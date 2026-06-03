@@ -1,7 +1,37 @@
 # read_page — fetch one specific URL and return its readable content
 
-**Status: SPEC (not yet built).** Design + acceptance below; the `.py` is written and deployed
-at the next OWUI session (deploy needs an OWUI restart — held during the live soak).
+**Status: v1.2 BUILT 2026-06-02 — PENDING RE-DEPLOY.** v1.0 was deployed in the v6/`--parallel 1`
+window; the first lived test (soak-notes Day 4) exposed the renderer's limits, and a calibration pass
+(operator + agent walking real pages: Wikipedia, derekthompson, theargumentmag, two Substack shares)
+drove v1.2. **The deployed copy is still v1.0** — re-paste into Workspace→Tools + OWUI restart to go
+live (bundle with the sidecar window). v1.2 adds:
+
+- **HTML → Markdown** (`markdownify`, a new fork dep) instead of flat text — preserves headings,
+  lists, **links**, and **tables** (Gemma reads markdown natively). Replaces v1.0's `get_text` which
+  flattened tables into unparseable cell-streams.
+- **Links preserved + absolutized** — relative hrefs resolve to absolute against the page URL, so the
+  model can `read_page` them next ("navigate around"). **Images → ALT text only** (`![alt]`), URL
+  dropped (CDN/avatar URLs were pure noise).
+- **Fragment-focus** — a `#anchor` in the URL renders just that section (heading + its content, in
+  document order, to the next same/higher heading), e.g. `…/List_of_largest_cities#List` → the 86-row
+  table alone, not the 60 K whole page.
+- **Client-side redirect following** — meta-refresh / JS `location.replace` "open in app" share
+  interstitials (e.g. `open.substack.com/pub/…`, the Substack **Android** share format) are followed
+  to the canonical article. SSRF-re-checked per hop.
+- **Feeds** → compact `N. title — date — link` enumeration (140-episode feed in ~18 K, was chopped to
+  ~15 at the old 8 K cap). **JSON** content-sniffed (iTunes `text/javascript`). **Cap → 60 K** (~22 K
+  tok, holds a full long article). SSRF guard unchanged.
+
+**Validated v1.2** (all live, 2026-06-02): theargumentmag 14 K/32 links; Substack Android share →
+meta-refresh → canonical 22 K/37 links; Wikipedia `#List` → 86-row markdown table, 264 links
+absolutized; audioboom RSS 140 episodes; loopback + tailnet SSRF refused. Offline: every renderer +
+billion-laughs guard.
+
+**Dependency:** `markdownify==1.2.2` (+`six`) — pinned in the fork's `pyproject.toml` +
+`backend/requirements.txt`, and installed in the OWUI venv via `uv` (`.venv` has no pip). Graceful
+fallback to flat text if the import is ever absent.
+
+Design + acceptance below.
 
 ## Intent
 
@@ -46,12 +76,25 @@ Docstring must steer routing to avoid overlap with `tavily_search`:
 ## Behavior
 
 1. **Fetch** via `aiohttp` GET (no SDK), browser-like `User-Agent`, `TIMEOUT` Valve (default 30s),
-   one redirect-following session, response size hard-capped while streaming (`MAX_FETCH_BYTES`).
+   manual redirect following (each hop SSRF-checked), response size hard-capped while streaming
+   (`MAX_FETCH_BYTES`). **Also follows client-side redirects** — a `<meta http-equiv=refresh>` or JS
+   `location.replace(...)` in the page head (the "open in app" share interstitials) is treated as
+   another hop, SSRF-re-checked.
 2. **Render by content-type:**
-   - `text/html` → strip to readable text/markdown with **BeautifulSoup** (already in OWUI's venv —
-     no new dep; drop `<script>/<style>/<nav>/<footer>`, collapse whitespace).
-   - `application/rss+xml`, `application/atom+xml`, `text/xml`, `application/xml` → **pass through raw**
-     (truncated) — the enumeration use case; don't strip tags, the model parses the feed.
+   - `text/html` → **convert to Markdown with `markdownify`** (main-content targeting: `<article>` /
+     `<main>` / `<body>`; drop `script/style/nav/footer/aside/button/iframe`). Preserves headings,
+     lists, **links** (relative → absolute so they're followable), and **tables** (→ markdown tables).
+     **Images render as ALT text only** (`![alt]`, src dropped). A **`#fragment`** focuses rendering on
+     that section (the anchor's heading + its content in document order, to the next same/higher
+     heading; or the element itself if the id is on a container). Falls back to flat `get_text` if the
+     `markdownify`/`bs4` deps are absent.
+   - `application/rss+xml`, `application/atom+xml`, `text/xml`, `application/xml`, **or any body that
+     sniffs as a feed** (`<rss`/`<feed`/`<channel`) → **parse into a compact enumeration**: one
+     `N. <title> — <date> — <link>` line per `<item>`/`<entry>` (RSS link-text or Atom `href`),
+     capped at `MAX_FEED_ITEMS`. **(Fix 2026-06-02 — raw passthrough was the original design but a
+     218 KB / 140-episode feed hit the char cap at ~15 items; raw XML is ~10× larger per item than the
+     enumeration needs. Compact parse fits a full 140-episode feed in ~18 K chars.)** Falls back to raw
+     (collapsed) if the XML doesn't parse. DOCTYPE/ENTITY refused (billion-laughs guard; stdlib ET).
    - `application/json` → pass through pretty-ish (truncated) — for the iTunes lookup step.
    - `text/plain` → as-is. Other/binary types → refuse with a readable note (don't dump bytes).
 3. **Truncate** to `max_chars` (call arg, clamped to `MAX_CONTENT_CHARS` Valve ceiling); append `…`
@@ -77,7 +120,8 @@ tailnet, the LAN). Before fetching:
 
 | Valve | Default | Purpose |
 |---|---|---|
-| `MAX_CONTENT_CHARS` | 8000 | ceiling on returned chars (token-budget guard; ~3K tok). `max_chars` arg clamps to this. |
+| `MAX_CONTENT_CHARS` | 60000 | ceiling on returned chars (~22K tok), sized to hold a full long article. `max_chars` arg clamps to this. **(8000 → 24000 → 60000 over 2026-06-02 as lived use showed feeds/articles/checklists chopped at the smaller caps.)** |
+| `MAX_FEED_ITEMS` | 500 | max items enumerated from a feed (covers a 140-episode podcast; guards a pathological feed). |
 | `MAX_FETCH_BYTES` | 5_000_000 | stop reading the response body past this (don't OOM on a huge file). |
 | `TIMEOUT` | 30 | HTTP timeout (s). |
 | `USE_TAVILY_EXTRACT` | false | if true, JS-heavy pages that return near-empty text fall back to Tavily Extract (`/extract`, reuses `TAVILY_API_KEY`, costs credits). Off by default — direct fetch handles RSS/JSON, which is the point. |
@@ -97,7 +141,9 @@ Keep `extract_depth`/credit cost out of the model's view — it's a Valve decisi
 
 1. **RSS enumeration (the trigger):** `read_page(<podcast rss feedUrl>)` returns episode titles +
    links well beyond the ~10–20 a snippet search surfaced; the model can then build the full table.
-   Validate on the show from the Day-4 chat via the iTunes-lookup → feedUrl → read_page chain.
+   **VALIDATED 2026-06-02 (post-fix):** the audioboom feed for "Movies You Forgot You Forgot" returns
+   **all 140 episodes** compactly (~18 K chars, latest-first, title — date — link). Pre-fix it
+   truncated to ~15 — the lived failure in the 06-02 enumeration test.
 2. **HTML → readable text:** a normal article URL returns clean prose (no `<script>`/nav cruft),
    capped at `MAX_CONTENT_CHARS`, with the truncation note when cut.
 3. **JSON passthrough:** `read_page("https://itunes.apple.com/lookup?id=<id>")` returns parseable

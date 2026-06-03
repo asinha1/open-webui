@@ -84,6 +84,7 @@ dependencies = [
     "nltk==3.9.3",
     "Markdown==3.10.2",
     "beautifulsoup4==4.14.3",
+    "markdownify==1.2.2", # mh-tools (fork): read_page HTML->Markdown
     "pypandoc==1.16.2",
     "pandas==3.0.1",
     "openpyxl==3.1.5",

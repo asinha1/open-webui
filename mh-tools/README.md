@@ -18,6 +18,8 @@ Tool param surfaces here are designed to **map 1:1 to a future MCP tool**, so pr
 ```
 tavily_search.py   — web search (Tavily REST via aiohttp; no SDK dep)
 tavily_search.md   — its design rationale + acceptance criteria
+read_page.py       — fetch one URL/feed and return its full readable body (companion to tavily_search; SSRF-guarded)
+read_page.md       — its design rationale + acceptance criteria
 ```
 
 Each tool = one `.py` (the OWUI Tool) + a `.md` spec.
