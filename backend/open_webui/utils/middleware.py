@@ -4108,6 +4108,17 @@ async def streaming_chat_response_handler(response, ctx):
 
                                     delta = choices[0].get('delta', {})
 
+                                    # [mh] runaway/truncation watch (backend-only; no UI edit, to keep
+                                    # upstream merges clean). max_tokens (16384) only fires on a
+                                    # degenerate/runaway response, so finish_reason=length is effectively
+                                    # a "this response ran away" alarm. grep the logs for 'hit max_tokens'.
+                                    if choices[0].get('finish_reason') == 'length':
+                                        log.warning(
+                                            '[mh] generation hit max_tokens (finish_reason=length) — likely runaway; chat_id=%s message_id=%s',
+                                            metadata.get('chat_id'),
+                                            metadata.get('message_id'),
+                                        )
+
                                     # Handle delta annotations
                                     annotations = delta.get('annotations')
                                     if annotations:

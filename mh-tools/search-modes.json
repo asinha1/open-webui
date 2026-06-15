@@ -1,0 +1,12 @@
+{
+  "_about": "Search-mode whitelists for tavily_search / deep_research. Each SPECIAL mode HARD-scopes results to its include_domains (Tavily `include_domains` = results ONLY from these). `general` = no whitelist (default, = today's behavior). topic=general for ALL modes (2026-06-10 depth A/B: topic bundling misdirected results; the whitelist does the targeting). depth is NOT set here — it's the wrapper policy (basic default + controlled escalate), uniform across modes. No recency (modes never set time_range). DESIGN GOAL = easy to change + test: the tool reads this file at call time, so edits take effect with NO code change / redeploy; the direct-API test rig reads the SAME file. Starters 2026-06-10 — operator to consult + lock the full lists.",
+  "_testable_enhancements": "trusted_news topic=news (its index ranks fresh reporting better) — A/B before enabling, do NOT turn on blind.",
+  "modes": {
+    "general":      { "include_domains": [],                                                                                                                                  "topic": "general" },
+    "trusted_news": { "include_domains": ["reuters.com","apnews.com","bbc.com","nytimes.com","theguardian.com","wsj.com","washingtonpost.com","ft.com","npr.org","economist.com"], "topic": "general" },
+    "academic":     { "include_domains": ["arxiv.org","pubmed.ncbi.nlm.nih.gov","nature.com","science.org","sciencedirect.com","springer.com","jstor.org","ssrn.com"],            "topic": "general" },
+    "government":   { "include_domains": ["congress.gov","sec.gov","nih.gov","cdc.gov","federalregister.gov","whitehouse.gov","usa.gov","gov.uk","europa.eu"],                    "topic": "general" },
+    "technical":    { "include_domains": ["developer.mozilla.org","docs.python.org","stackoverflow.com","github.com","postgresql.org","kubernetes.io","learn.microsoft.com","developer.apple.com"], "topic": "general" },
+    "finance":      { "include_domains": ["sec.gov","finance.yahoo.com","bloomberg.com","reuters.com","wsj.com","ft.com","marketwatch.com","morningstar.com"],                   "topic": "general" }
+  }
+}

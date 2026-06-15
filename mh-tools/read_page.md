@@ -1,10 +1,35 @@
 # read_page — fetch one specific URL and return its readable content
 
-**Status: v1.2 BUILT 2026-06-02 — PENDING RE-DEPLOY.** v1.0 was deployed in the v6/`--parallel 1`
-window; the first lived test (soak-notes Day 4) exposed the renderer's limits, and a calibration pass
-(operator + agent walking real pages: Wikipedia, derekthompson, theargumentmag, two Substack shares)
-drove v1.2. **The deployed copy is still v1.0** — re-paste into Workspace→Tools + OWUI restart to go
-live (bundle with the sidecar window). v1.2 adds:
+**Status: v1.4 DEPLOYED 2026-06-12 — the JS-render FOLD.** The former `render_page` tool is folded in:
+when a fetched HTML page is a near-empty app shell (the JS-gated trigger), read_page now escalates to a
+headless-Chromium render ITSELF (`RENDER_ESCALATION` valve, default on; degrades off if playwright is
+absent), instead of returning a "couldn't access, try render_page" marker. **One reader tool, no
+read-vs-render routing decision**; the access-failure marker now fires only AFTER the browser was also
+tried; read_page stays light on the hot path (the browser spins only on the near-empty cold path). The
+Chromium SSRF route-guard + markdown renderer are reused from read_page, not duplicated. **Validated
+2026-06-12:** offline direct-call + an E4B sidecar A/B (`eval/` Block T: T2 FAIL@v1.2 → PASS@v1.4) + a
+full Block A/B regression (zero auto-fails; probe 13 = a single read_page call returns the rendered
+quotes). Deployed by DB surgery (content → v1.4, drop render_page from the 31B toolIds, delete its
+`tool` row, OWUI restart); `render_page.{py,md}` deleted. This supersedes the prior **v1.3 / v1.2**
+history (both were uncommitted; the working tree + deploy jump v1.2 → v1.4). v1.3 (2026-06-06) added:
+
+- **TLS via certifi's CA bundle.** All four reads of `cityjobs.nyc.gov` job listings failed with
+  `[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate` — the server sends a valid
+  leaf cert but the needed intermediate lives only in the macOS system store, which Python's bundled
+  OpenSSL doesn't read (WebFetch, using the OS store, loaded the same pages fine → confirmed our-side).
+  Fix: build the aiohttp TLS context from `certifi.where()` (`certifi` already in the venv; module-level
+  `_SSL_CONTEXT`, applied via a `TCPConnector`; falls back to the default context if certifi is absent).
+  **Validated 2026-06-06:** the fixture now loads with the real salary range *and* the "vacancy expired"
+  banner — the two critical-info errors the readout traced to the failed read (salary estimated from
+  snippets; expired jobs shown as current) both resolve in one read.
+- **Near-empty HTML → explicit RETRIEVAL FAILURE.** A JS-gated / login-walled / interstitial page
+  returns a tiny shell (Harry's menu = 55 chars); v1.2 returned that as body and the model read the
+  absence of content as *"they don't list a menu"* (absence ≠ inability — soak-notes Day 6). v1.3: if
+  an HTML render is below `MIN_READABLE_CHARS` (Valve, default 200), return a marker that says the page
+  could not be ACCESSED (likely JS/wall/interstitial) and to try another source — never infer absence.
+  **Validated 2026-06-06:** Harry's now returns the failure marker; real pages (cityjobs) pass through.
+
+The v1.2 baseline (still in force) adds:
 
 - **HTML → Markdown** (`markdownify`, a new fork dep) instead of flat text — preserves headings,
   lists, **links**, and **tables** (Gemma reads markdown natively). Replaces v1.0's `get_text` which
@@ -123,9 +148,14 @@ tailnet, the LAN). Before fetching:
 | `MAX_CONTENT_CHARS` | 60000 | ceiling on returned chars (~22K tok), sized to hold a full long article. `max_chars` arg clamps to this. **(8000 → 24000 → 60000 over 2026-06-02 as lived use showed feeds/articles/checklists chopped at the smaller caps.)** |
 | `MAX_FEED_ITEMS` | 500 | max items enumerated from a feed (covers a 140-episode podcast; guards a pathological feed). |
 | `MAX_FETCH_BYTES` | 5_000_000 | stop reading the response body past this (don't OOM on a huge file). |
+| `MIN_READABLE_CHARS` | 200 | below this many rendered chars an HTML page is treated as a retrieval *failure* (JS-gated / walled / interstitial), not as empty content — the model is told it couldn't access the page. **(v1.3 — the Harry's "they don't list a menu" absence-vs-inability fix.)** |
 | `TIMEOUT` | 30 | HTTP timeout (s). |
 | `USE_TAVILY_EXTRACT` | false | if true, JS-heavy pages that return near-empty text fall back to Tavily Extract (`/extract`, reuses `TAVILY_API_KEY`, costs credits). Off by default — direct fetch handles RSS/JSON, which is the point. |
 | `TAVILY_API_KEY` | "" | only read when `USE_TAVILY_EXTRACT` is on; mirror the `tavily_search` Valve. |
+| `RENDER_ESCALATION` | true | **(v1.4)** on a near-empty HTML page, escalate to a headless-Chromium render internally (the folded-in render_page). Off = exact v1.3 behavior (emit the couldn't-access marker). Auto-off if playwright is absent. |
+| `RENDER_TIMEOUT` | 35 | **(v1.4)** headless-render navigation timeout (s); separate from the plain-fetch `TIMEOUT`. |
+| `RENDER_NETWORKIDLE_MS` | 6000 | **(v1.4)** post-DOM wait for network idle (the JS injection window) before reading the rendered page. |
+| `RENDER_BLOCK_MEDIA` | true | **(v1.4)** abort image/media/font requests during a render (faster + smaller SSRF surface). |
 
 Keep `extract_depth`/credit cost out of the model's view — it's a Valve decision, not a per-call arg.
 
@@ -134,8 +164,14 @@ Keep `extract_depth`/credit cost out of the model's view — it's a Valve decisi
 - timeout → "reading that page timed out after Ns; try again or work from what you have."
 - non-200 → "that page returned HTTP <code>; the URL may be wrong or the page gone."
 - blocked host (SSRF guard) → refusal string above.
-- empty/binary content → "that URL returned no readable text (it may be a media/binary file or a
-  JS-only app)." (If `USE_TAVILY_EXTRACT`, try the fallback before giving up.)
+- **near-empty HTML render** (below `MIN_READABLE_CHARS`) → an explicit *failure to access* marker
+  ("I reached <url> but it returned almost no readable text … treat this as a FAILURE TO ACCESS the
+  page, NOT as evidence the content doesn't exist") so the model reports inability, not absence.
+  (If `USE_TAVILY_EXTRACT`, the fallback is tried before this fires.)
+- empty/binary content (non-HTML) → "that URL returned no readable text (it may be a media/binary
+  file or a JS-only app)."
+- **TLS chain failure** is avoided by building the context from certifi (`_SSL_CONTEXT`); a genuine
+  network/TLS error still degrades to the aiohttp `ClientError` readable string, not a stack trace.
 
 ## Acceptance criteria
 
@@ -155,9 +191,25 @@ Keep `extract_depth`/credit cost out of the model's view — it's a Valve decisi
 6. **Routing:** the model reaches for `read_page` when given/holding a URL or asked to enumerate a
    feed, and for `tavily_search` (not `read_page`) for open-ended discovery. Watch for it trying to
    `read_page` a URL it guessed/hallucinated — prefer search-then-read.
+7. **TLS (v1.3):** an HTTPS page whose chain needs an intermediate only in the macOS store
+   (`cityjobs.nyc.gov/job/…`) loads cleanly instead of `CERTIFICATE_VERIFY_FAILED`.
+   **VALIDATED 2026-06-06** — fixture returns real salary + expiry banner.
+8. **Absence vs. inability (v1.3):** a JS-gated page (`harrysbarrestaurant.com/new-york-menu`, ~55
+   chars) returns the *failure-to-access* marker, not a near-empty body the model would read as "the
+   content doesn't exist." **VALIDATED 2026-06-06.**
+9. **JS-render fold (v1.4):** a JS-gated page whose content IS renderable (`quotes.toscrape.com/js/` —
+   quotes injected by JS; a plain GET sees an empty container) returns the real rendered content via the
+   internal headless escalation, header-marked "read via headless render"; a server-rendered page does
+   NOT escalate (the hot path stays light); a genuinely-walled page still returns the failure-to-access
+   marker (now after the browser was also tried). **VALIDATED 2026-06-12** (offline direct-call + E4B
+   sidecar Block-T A/B, T2 FAIL@v1.2 → PASS@v1.4; full regression probe 13 = single read_page → quotes).
 
 ## Deferred / out of scope
 
 - HTML-table extraction into structured rows (return readable text; let the model tabulate).
 - Pagination/crawl-following (one URL per call by design; the model chains calls).
-- Headless-browser rendering beyond the optional Tavily Extract fallback.
+- Authenticated rendering / cookie injection; clicking through multi-step JS flows (the internal render
+  does one `goto` + settle, no interaction). **Cross-origin iframes are unreachable** (a browser security
+  boundary) — e.g. a menu embedded from a different-origin Toast iframe renders the *tabs* but not the
+  items; the right path is to follow the order/menu link to its own origin and read THAT. (Inherited from
+  the folded-in render_page's known limitation.)

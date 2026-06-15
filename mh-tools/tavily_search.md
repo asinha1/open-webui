@@ -19,7 +19,7 @@ Tool-calling reliability on a 31B drops with every extra parameter, so the model
 
 Friendly names (`quick`/`deep`) call more reliably than API jargon (`basic`/`advanced`). `Literal` types become JSON-schema enums, so the model can only pick valid values. The `:param:` docstring lines become the per-argument descriptions the model reads — that's the "when to use deep vs quick / news" guidance, and the **prompt-layer trigger** lives here, not in the system prompt.
 
-**Valves (operator-only, model can't see):** `TAVILY_API_KEY`, `MAX_RESULTS` (clamped 1–10, default **4**), `INCLUDE_ANSWER`, `MAX_CONTENT_CHARS` (per-result truncation, default **1500**), `TIMEOUT`. (Sizing went 5/1500 → 3/800 → 4/1500 on 2026-05-30 — see "Trim rationale" below.)
+**Valves (operator-only, model can't see):** `TAVILY_API_KEY`, `MAX_RESULTS` (clamped 1–10, default **4**), `INCLUDE_ANSWER`, `MAX_CONTENT_CHARS` (per-result truncation, default **1500**), `TIMEOUT`. (Sizing went 5/1500 → 3/800 → 4/1500 on 2026-05-30 — see "Trim rationale" below.) **Governor Valves (v1.1.0):** `GOVERNOR_ENABLED` (default **on**), `DEDUP_JACCARD` (default **0.8**), `READ_NUDGE_AFTER_K` (default **4**), `GOVERNOR_MAX_CHATS` (default **200**) — see "Over-search governor" below.
 
 ### Locked design decisions (2026-05-30)
 
@@ -39,6 +39,46 @@ Two structural facts drove the new defaults:
 This pairs with the **2026-05-30 window bump to `--ctx-size 131072` (64K/slot)**: the window holds many *conversation* rounds, the trim keeps each round's *noise* low.
 
 **Relaxed 3/800 → 4/1500 (same day), after lived use.** The first comparison query post-bump came back mostly right but hedged one field as **"4+"** where the real count was **9** — the `N+` signature of a *truncated enumeration* (the full trophy list didn't fit 800 chars / a dropped result). Two facts made relaxing the clear call: (1) the budget reason for trimming was gone at 64K — even a 10-search turn at 4×1500 is ~17K tokens; (2) result count doesn't affect Tavily billing, so the trim never saved money. So content went back to 1500 (enumerations survive) and results to 4 (still drops the worst noise-ranked tail). The result *cap* stays because 64K alone can still be swamped by a pathological 15-search turn — defense-in-depth, not budget.
+
+## Over-search governor (v1.1.0 → CROSS-TOOL v1.2.0, 2026-06-12)
+
+The probe-10 failure mode is an **enumeration storm**: on open-ended "find N items meeting criteria"
+tasks the model fires web searches repeatedly — near-duplicate facet-repeats — and estimates specific
+values (salaries) from snippets instead of reading the page (the June-10 trace: 21 searches, ~40% near-dup,
+0 reads; the June-12 regression: 9 searches, hit the round cap, blank synthesis). The prompt lever measured
+**null at 3× A/B** (v11 carry-E), so the fix is **tool-side**, in two levers — both delivered as
+**tool-response content** (actionable, not prompt instructions):
+
+1. **Cross-call near-duplicate dedup.** Each query is normalized to a token set — lowercase, quotes
+   stripped, number/salary-syntax variants collapsed to one `<num>` token (`100,000` ≡ `$100k` ≡
+   `$100,000 - $150,000`), `site:<domain>` kept as a facet token, stopwords dropped — and compared by
+   **Jaccard similarity** to prior searches *this chat*. **≥ `DEDUP_JACCARD` (0.8) → skip the search**
+   (saves the loop round **and** the credit) and return a note pointing at the prior search / `read_page`.
+   Deliberately **conservative**: it catches cosmetic repeats but leaves genuinely broadening facets
+   (DSNY vs DEP) — suppressing legit breadth is worse than a missed dedup.
+2. **Escalating read-nudge.** Once a chat has run `READ_NUDGE_AFTER_K` (4) combined searches **and** result
+   URLs are in hand, append a nudge to open a result with `read_page`; at **2×K (8)** it escalates to a firm
+   *"stop searching — synthesize from what you've found or read a specific listing."* Attacks the 0-read /
+   snippet-estimating root cause **and** the non-convergence (round-cap) failure.
+
+**CROSS-TOOL (v1.2.0) — the key change.** v1.1 governed only `tavily_search`; the model then **escaped the
+storm into the ungoverned `deep_research`** (probe 10c: 6 tavily + 6 deep_research = 12 combined, round cap).
+So v1.2 makes the governor **cross-tool**: `tavily_search` and `deep_research` (its `query`/search mode)
+**share ONE per-chat budget + dedup set**, so a `deep_research` query that repeats a prior `tavily_search`
+is skipped and both count toward the same nudge threshold. `deep_research`'s `urls`/read mode is **not**
+governed (it's the desired *read* — its URLs are noted as "reading happened").
+
+**Shared state mechanism.** The state is a **process-global `sys.modules` sentinel** (`_mh_governor_store`)
+that BOTH tools reach — OWUI DB-tools can't import a sibling module, so the small governor block is mirrored
+byte-for-byte in both files, but the *state* (`CHAT`/`ORDER`) is singleton. Chosen over `app.state` (absent
+in the eval harness) and Redis/file (durability/cross-instance we don't need — the state is ephemeral,
+within-conversation). It's keyed by the **injected `__chat_id__`** (OWUI middleware builds it,
+`utils/middleware.py:2429`; bound only because the method declares it, `utils/tools.py:172`, then stripped
+from the model-facing signature so **`specs` are unchanged**), LRU-capped at `_GOV_MAX_CHATS` (200), lost on
+restart. **No chat_id (temp chat / harness without injection) → degrades OFF = exact pre-governor behavior.**
+Feasibility + the shared-state research are in provisioning `composition-design.md` §3/§8. **Future scale-out:**
+single-worker uvicorn today; if we go multi-worker/instance, back the store with OWUI's `RedisDict`
+(`app.state.redis`) — a localized swap, mirroring OWUI's own `SESSION_POOL = RedisDict(...) if redis else {}`.
 
 ## Behavior worth knowing
 
@@ -60,6 +100,9 @@ This pairs with the **2026-05-30 window bump to `--ctx-size 131072` (64K/slot)**
 - [ ] `raw_content` never appears in model context.
 - [ ] A forced 401/429 returns a graceful message, not a stack trace.
 - [ ] Built-in `web_search` feature is OFF on Gemma (this tool owns the web path); restart-after-enable done.
+- [ ] **Governor — dedup:** in an enumeration turn, a near-duplicate second search returns the `[over-search guard] Skipped…` note (no Tavily call spent); total `tavily_search` calls drop, near-dup ~0. (probes.yaml probe 10 / the new enumeration probe.)
+- [ ] **Governor — read-nudge:** after `READ_NUDGE_AFTER_K` searches with URLs in hand, the `[over-search guard] You've run N searches…` nudge is appended **and** a `read_page` follows.
+- [ ] **Governor — degrade:** with no `__chat_id__` (temp chat), behavior is identical to v1.0 (no notes, no nudges) — no crash.
 
 ## Portability (bottleneck-watch hedge)
 

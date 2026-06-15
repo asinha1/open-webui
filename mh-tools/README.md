@@ -16,10 +16,14 @@ Tool param surfaces here are designed to **map 1:1 to a future MCP tool**, so pr
 ## Contents
 
 ```
-tavily_search.py   — web search (Tavily REST via aiohttp; no SDK dep)
-tavily_search.md   — its design rationale + acceptance criteria
-read_page.py       — fetch one URL/feed and return its full readable body (companion to tavily_search; SSRF-guarded)
-read_page.md       — its design rationale + acceptance criteria
+tavily_search.py     — web search (Tavily REST via aiohttp; no SDK dep)
+tavily_search.md     — its design rationale + acceptance criteria
+read_page.py         — fetch one URL/feed → full readable body; escalates JS-gated pages to a headless-Chromium render INTERNALLY (v1.4 fold of the former render_page; SSRF-guarded; dep: playwright + chromium)
+read_page.md         — its design rationale + acceptance criteria
+export_document.py   — render the model's content to a downloadable .md/.pdf file + return a download link (markdown + fpdf2; no new dep)
+export_document.md   — its design rationale + acceptance criteria
+deep_research.py     — read several sources in parallel (urls, or query→search→read) and return one consolidated digest (parallel tool-I/O, single-pass synthesis; SSRF-guarded; no new dep)
+deep_research.md     — its design rationale + acceptance criteria
 ```
 
 Each tool = one `.py` (the OWUI Tool) + a `.md` spec.

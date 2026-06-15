@@ -1,15 +1,26 @@
 """
 title: Read Page
 author: mh-tools
-version: 1.2.0
+version: 1.4.0
 required_open_webui_version: 0.4.0
 """
 # Custom OWUI tool — version-controlled in the open-webui fork under mh-tools/.
-# Companion to tavily_search: search FINDS pages (snippets); read_page OPENS one (full body).
+# Companion to tavily_search: search FINDS pages (snippets); read_page OPENS one (full body) —
+# and, since v1.4, escalates to a headless-Chromium render INTERNALLY for JS-gated pages.
 # Deployed into Open WebUI via Workspace -> Tools (stored in webui.db; this fork has no
 # filesystem tools dir). Edit here, re-paste to update, then RESTART OWUI (tool binding is
 # not reliably re-read live). Design rationale + acceptance criteria: mh-tools/read_page.md.
 #
+# v1.4: FOLD-IN of the former render_page tool — when the plain fetch returns a near-empty app
+#   shell (the JS-gated trigger below), read_page now escalates to a headless Chromium render
+#   ITSELF (RENDER_ESCALATION valve, default on; degrades off if playwright is absent) instead of
+#   returning a "couldn't access, try render_page" marker. One reader tool, no read-vs-render
+#   routing decision; the access-failure marker now fires only AFTER the browser was also tried.
+#   read_page stays light on the hot path — the browser spins only on the near-empty cold path.
+# v1.3: TLS via certifi's CA bundle (fixes CERTIFICATE_VERIFY_FAILED on valid HTTPS sites whose
+#   intermediate cert only lives in the macOS system store — e.g. cityjobs.nyc.gov); near-empty
+#   HTML render now reported as an explicit RETRIEVAL FAILURE (JS-gated/walled/interstitial) so
+#   the model says "I couldn't read it" instead of inferring the content doesn't exist.
 # v1.2: HTML -> Markdown via markdownify (links + tables + headings preserved; images become
 #   alt-text only, URL dropped); follows meta-refresh / JS "open in app" interstitials (Substack
 #   Android shares); fragment-focus (#anchor -> just that section); RSS/Atom -> compact item list;
@@ -26,6 +37,7 @@ import json
 import logging
 import re
 import socket
+import ssl
 import xml.etree.ElementTree as ET
 from html import unescape
 from typing import Optional
@@ -44,6 +56,28 @@ try:
 except ImportError:  # markdownify is a deliberate fork dep; fall back to plain text if absent
     MarkdownConverter = None
 
+try:
+    import certifi
+    # TLS context from certifi's CA bundle, not OpenSSL's default search path. On this host the
+    # default context can't complete some valid chains (the server sends a leaf but the needed
+    # intermediate lives only in the macOS system store, which Python's OpenSSL doesn't read) ->
+    # [SSL: CERTIFICATE_VERIFY_FAILED] on sites the OS trusts fine (e.g. cityjobs.nyc.gov, where
+    # all reads failed 2026-06-06). certifi's bundle includes those intermediates -> chain verifies.
+    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:  # certifi absent/unreadable -> fall back to aiohttp's default context
+    _SSL_CONTEXT = None
+
+try:
+    # v1.4: the JS-render escalation (folded-in render_page). Optional, heavy dep (a browser engine)
+    # — guarded so a box WITHOUT it keeps the full plain-fetch tool; escalation just degrades off.
+    from playwright.async_api import async_playwright, Error as PlaywrightError
+    _PW_OK = True
+except Exception as _e:
+    async_playwright = None
+    PlaywrightError = Exception
+    _PW_OK = False
+    logging.getLogger("mh.read_page").warning("playwright unavailable, JS-render escalation off: %s", _e)
+
 log = logging.getLogger("mh.read_page")
 
 # Tailscale / CGNAT shared address space (RFC 6598). Python 3.11 already reports
@@ -57,6 +91,9 @@ _HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 # Stripped before markdown conversion (chrome that competes with content for the char budget).
 _SKIP_TAGS = ["script", "style", "nav", "footer", "header", "aside", "noscript",
               "form", "svg", "button", "iframe"]
+# v1.4 render escalation: resource types never needed for text extraction — aborting them speeds
+# the render and shrinks the SSRF surface the route guard must vet.
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 # Client-side redirects (no HTTP 3xx) — the "open in app" / share interstitials.
 _META_REFRESH_RE = re.compile(
     r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\'][^"\']*?url=([^"\'>]+)', re.I)
@@ -110,6 +147,11 @@ class Tools:
         MAX_FETCH_BYTES: int = Field(
             5_000_000, description="Stop reading the response body past this many bytes (don't OOM on a huge file)."
         )
+        MIN_READABLE_CHARS: int = Field(
+            200, description="If an HTML page renders fewer than this many chars of text, treat it as a "
+                             "retrieval FAILURE (JS-gated / login-walled / interstitial) and tell the model "
+                             "it could not ACCESS the page — never let it infer the content doesn't exist."
+        )
         TIMEOUT: int = Field(30, description="HTTP timeout in seconds.")
         USE_TAVILY_EXTRACT: bool = Field(
             False, description="If a JS-heavy page returns near-empty text, fall back to Tavily Extract "
@@ -117,6 +159,23 @@ class Tools:
         )
         TAVILY_API_KEY: str = Field(
             "", description="Only read when USE_TAVILY_EXTRACT is on; mirror the tavily_search key. Never committed."
+        )
+        RENDER_ESCALATION: bool = Field(
+            True, description="v1.4: when a fetched HTML page is near-empty (JS-gated), escalate to a "
+                              "headless-Chromium render internally (the folded-in render_page). Off = exact "
+                              "v1.3 behavior (emit the couldn't-access marker). Auto-off if playwright is absent."
+        )
+        RENDER_TIMEOUT: int = Field(
+            35, description="Headless-render navigation timeout (s). The render is slow; keep generous. "
+                            "Separate from the plain-fetch TIMEOUT above."
+        )
+        RENDER_NETWORKIDLE_MS: int = Field(
+            6000, description="After DOM load, wait up to this long for the network to go idle (lets "
+                              "client-side content inject) before reading the rendered page."
+        )
+        RENDER_BLOCK_MEDIA: bool = Field(
+            True, description="During a render, abort image/media/font requests (faster render, smaller "
+                              "SSRF surface)."
         )
 
     def __init__(self):
@@ -165,8 +224,12 @@ class Tools:
 
         try:
             timeout = aiohttp.ClientTimeout(total=self.valves.TIMEOUT)
+            # Apply the certifi-backed TLS context (when available) so valid HTTPS chains that
+            # the default OpenSSL store can't complete still verify. The session owns the
+            # connector and closes it on exit.
+            connector = aiohttp.TCPConnector(ssl=_SSL_CONTEXT) if _SSL_CONTEXT else None
             async with aiohttp.ClientSession(
-                timeout=timeout, headers={"User-Agent": _UA}
+                timeout=timeout, headers={"User-Agent": _UA}, connector=connector
             ) as session:
                 fetched = await self._fetch_following_redirects(session, url)
                 if isinstance(fetched, str):  # a model-readable refusal/error
@@ -182,7 +245,7 @@ class Tools:
                 title, body = self._render(ctype, raw, fragment, final_url)
 
                 # JS-heavy page yielded almost nothing -> optional Tavily Extract fallback.
-                if (("html" in ctype) and len(body.strip()) < 200
+                if (("html" in ctype) and len(body.strip()) < self.valves.MIN_READABLE_CHARS
                         and self.valves.USE_TAVILY_EXTRACT and self.valves.TAVILY_API_KEY):
                     extracted = await self._tavily_extract(session, final_url)
                     if extracted:
@@ -197,6 +260,34 @@ class Tools:
             await emit_status("Reading the page failed (network).", done=True)
             return "Reading that page failed (network error). Work from what you have, or try a different URL."
 
+        # Near-empty HTML = the plain fetch got an app shell (JS-gated / walled / interstitial).
+        # TIER 2 (v1.4) — escalate to a headless-Chromium render INTERNALLY (the folded-in
+        # render_page) so the model never has to pick read-vs-render. Free/local; fires only on this
+        # cold path — the 95% (articles/feeds/JSON) never touch the browser, so read_page stays light.
+        rendered = False
+        if ("html" in ctype and len(body.strip()) < self.valves.MIN_READABLE_CHARS
+                and self.valves.RENDER_ESCALATION and _PW_OK):
+            await emit_status("Page looks JavaScript-rendered — escalating to a headless browser…")
+            r_title, r_body = await self._render_with_browser(final_url, fragment)
+            if len(r_body.strip()) >= self.valves.MIN_READABLE_CHARS:
+                body, title, rendered = r_body, (r_title or title), True
+
+        # Still near-empty after the fetch (and the render, if it ran) = retrieval FAILURE, not
+        # "the content isn't there". The model must report it couldn't ACCESS the page rather than
+        # infer absence (the Harry's "they don't list a menu" failure, 2026-06-06). HTML-scoped — a
+        # short feed/JSON/text body is fine.
+        if "html" in ctype and len(body.strip()) < self.valves.MIN_READABLE_CHARS:
+            await emit_status("Page returned almost no readable text.", done=True)
+            tried = ("fetched it and rendered it in a headless browser"
+                     if (self.valves.RENDER_ESCALATION and _PW_OK) else "fetched it")
+            return (
+                f"I {tried}, but {final_url} returned almost no readable text "
+                f"({len(body.strip())} chars) — it's most likely behind a login/anti-bot wall or an "
+                f"'open in app' interstitial. Treat this as a FAILURE TO ACCESS the page, NOT as "
+                f"evidence the content doesn't exist. Tell the user you couldn't read it, and try a "
+                f"different source or the site's RSS/Atom feed."
+            )
+
         if not body.strip():
             return ("That URL returned no readable text (it may be a media/binary file or a "
                     "JavaScript-only app). Try its RSS/Atom feed or a different source.")
@@ -206,8 +297,8 @@ class Tools:
             body = body[:cap].rstrip() + "…"
 
         log.info(
-            "read_page url=%r status=%s ctype=%s frag=%r bytes=%d chars=%d truncated=%s",
-            final_url[:120], status, ctype, fragment, len(raw), len(body), truncated,
+            "read_page url=%r status=%s ctype=%s frag=%r bytes=%d chars=%d rendered=%s truncated=%s",
+            final_url[:120], status, ctype, fragment, len(raw), len(body), rendered, truncated,
         )
 
         if __event_emitter__:
@@ -223,11 +314,70 @@ class Tools:
         await emit_status(f"Read {len(body)} chars.", done=True)
 
         header = f"Content of {final_url}"
+        if rendered:
+            header += " (read via headless render — the plain fetch returned an app shell)"
         if title:
             header += f" — {title}"
         note = ("\n\n[content truncated to fit; the page/list may be incomplete — re-read with a "
                 "higher max_chars or a more specific URL if you need more]") if truncated else ""
         return f"{header}\n\n{body}{note}"
+
+    # ---- internal JS-render escalation (v1.4: folds in the former render_page tool) ----------
+
+    async def _render_with_browser(self, url, fragment=""):
+        """Headless-Chromium escalation for a page the plain fetch got as an app shell. Reuses this
+        tool's _url_refusal (per-request route guard) + _html_to_markdown (fragment-aware), so no
+        logic is duplicated. Returns (title, body); ('', '') on any failure (the caller then emits
+        the access-failure marker). SSRF is HARDER here — a browser fires its OWN sub-requests — so
+        every request is host-checked via the route guard, fail-closed, with a per-host verdict cache."""
+        if not _PW_OK:
+            return "", ""
+        host_verdicts = {}  # host -> None(ok) | str(refuse); one DNS check per distinct host
+
+        async def _guard(route):
+            req = route.request
+            try:
+                if self.valves.RENDER_BLOCK_MEDIA and req.resource_type in _BLOCKED_RESOURCE_TYPES:
+                    return await route.abort()
+                host = urlsplit(req.url).hostname
+                verdict = host_verdicts.get(host, "‹unset›")
+                if verdict == "‹unset›":
+                    verdict = await self._url_refusal(req.url)
+                    host_verdicts[host] = verdict
+                if verdict is None:
+                    await route.continue_()
+                else:
+                    log.warning("read_page render SSRF-blocked sub-request host=%r", host)
+                    await route.abort()
+            except Exception:
+                try:
+                    await route.abort()  # never let the guard raise into the browser; fail closed
+                except Exception:
+                    pass
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    context = await browser.new_context(user_agent=_UA)
+                    await context.route("**/*", _guard)
+                    page = await context.new_page()
+                    await page.goto(url, wait_until="domcontentloaded",
+                                    timeout=self.valves.RENDER_TIMEOUT * 1000)
+                    try:
+                        await page.wait_for_load_state(
+                            "networkidle", timeout=self.valves.RENDER_NETWORKIDLE_MS)
+                    except PlaywrightError:
+                        pass  # networkidle is best-effort; proceed with what rendered
+                    final_url = page.url
+                    html = await page.content()
+                finally:
+                    await browser.close()
+        except PlaywrightError as e:
+            msg = str(e).splitlines()[0] if str(e) else "navigation error"
+            log.warning("read_page render failed url=%r: %s", url[:120], msg)
+            return "", ""
+        return self._html_to_markdown(html, fragment, final_url)
 
     # ---- fetch + SSRF-safe redirect following -------------------------------
 
