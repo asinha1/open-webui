@@ -1935,7 +1935,7 @@
 			..._files.filter(
 				(item) =>
 					['doc', 'text', 'note', 'chat', 'folder', 'collection'].includes(item.type) ||
-					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
+					(item.type === 'file') /* [mh] include images in files so they mount to /mnt/uploads for the code interpreter; the vision path is separate. RE-APPLY ON MERGES */
 			)
 		);
 		chatFiles = chatFiles.filter(
@@ -2290,7 +2290,7 @@
 			...(userMessage?.files ?? []).filter(
 				(item) =>
 					['doc', 'text', 'note', 'chat', 'collection', 'folder'].includes(item.type) ||
-					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
+					(item.type === 'file') /* [mh] include images in files so they mount to /mnt/uploads for the code interpreter; the vision path is separate. RE-APPLY ON MERGES */
 			)
 		);
 		// Remove duplicates

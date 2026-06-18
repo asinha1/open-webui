@@ -24,6 +24,13 @@ export_document.py   — render the model's content to a downloadable .md/.pdf f
 export_document.md   — its design rationale + acceptance criteria
 deep_research.py     — read several sources in parallel (urls, or query→search→read) and return one consolidated digest (parallel tool-I/O, single-pass synthesis; SSRF-guarded; no new dep)
 deep_research.md     — its design rationale + acceptance criteria
+knowledge_search.py  — owned, governed RAG over the home-network KB (replaces OWUI's built-in; CRAG relevance grade + a per-turn empty-loop guard; RFC-MH-001)
+knowledge_search.md  — its design rationale + acceptance criteria
+save_research.py     — the "Save Sources" ACTION (OWUI function, type=action, id save_sources): a click saves the pages read this chat into a research:<domain>/<subtopic> Knowledge collection (two-step input dialog → re-fetch via get_content_from_url → save_docs_to_vector_db; provenance + url-hash dedup). NOT a model-routed tool — the button writes, never the model. Design: tooling-research/self-generating-rag-design.md (RFC-MH-002).
+save_research.md     — its design rationale + acceptance criteria
+research_search.py   — the model-facing READ tool for the saved research:* collections (mirrors knowledge_search: query_collection + CRAG 0.69 + per-turn governor; surfaces each hit's source URL + saved_at). Separate from knowledge_search; unification long-term-open. Design: same RFC-MH-002 doc.
+research_search.md   — its design rationale + acceptance criteria
+research-topics.json — the curated topic registry / breadth-cap (seed domains: finance, health, cooking; new domains = an operator edit)
 ```
 
 Each tool = one `.py` (the OWUI Tool) + a `.md` spec.

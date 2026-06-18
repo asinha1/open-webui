@@ -605,20 +605,59 @@ You have access to a Python code interpreter via: `<code_interpreter type="code"
 
 Ensure the code interpreter is effectively utilized to achieve the highest-quality analysis for the user."""
 
-# Appended to the code interpreter prompt only when engine is pyodide (not jupyter)
+# Appended to the code interpreter prompt only when engine is pyodide (not jupyter).
+# [mh] Patched 2026-06-15 (RE-APPLY ON MERGES): default plots to inline plt.show() and reframe
+# /mnt/uploads as the chat file panel (not a server disk path) — the 31B was over-using savefig and
+# narrating /mnt/uploads/plot.png as a disk location the user couldn't find.
+# [mh] Patched 2026-06-17 (RE-APPLY ON MERGES): +3 sections — "displayed image — never rewrite/re-link"
+# (the 31B fabricated an absolute image URL https://api.v1/files/<id>/content → broken-img icon),
+# "working with results" (print + interpret-the-output + iterate-on-error), and a clearer attached-file
+# rule (embed small text data in code; binary/large files go via the /mnt/uploads file panel). RATIONALE:
+# under native FC this PYODIDE prompt is the ONLY code-interpreter prompt injected — the general
+# DEFAULT_CODE_INTERPRETER_PROMPT (incl. its "display the link as-is", "print meaningful output", and
+# "interpret the result" lines) is the XML-tag path, SKIPPED at middleware.py:2584/2599. Forge (autonomous CI).
+# [mh] Corrected 2026-06-18 (RE-APPLY ON MERGES): the "Files" section was REWRITTEN. Attached files ARE
+# auto-mounted to /mnt/uploads on the native-FC code-interpreter path (traced: middleware.py emits
+# execute:python with metadata['files'] -> +layout.svelte getFileContentById -> pyodide.worker fsUploadFiles
+# -> /mnt/uploads; upstream OWUI docs confirm "automatic upload mounting"). The prior "attached file = text
+# in conversation, NOT at /mnt/uploads" wording was a RUN-BUTTON-mode leftover (the manual CodeBlock Run path
+# does NOT mount message attachments) and was making the 31B transcribe data + guess image paths. Now: list
+# /mnt/uploads first, read the real file. (NOTE: the API-only eval harness can't browser-mount, so this path
+# is in-UI verified, not harness-verified.)
+# [mh] Patched 2026-06-18b (RE-APPLY ON MERGES): +package list (steer images to matplotlib.image — PIL is
+# NOT pre-installed in Pyodide), +stop-on-"session disconnected"/repeated-error (kills the observed 21-call
+# execute_code loop), +named-file/stale-/mnt/uploads caveat (it persists across chats), +image attachments
+# don't auto-mount -> ask for the file panel & never estimate pixels from vision. All observed on Forge 06-18.
 CODE_INTERPRETER_PYODIDE_PROMPT = """
 
 ##### Pyodide Environment
 
 - This Python environment runs via Pyodide in the browser. **Do not install packages** — `pip install`, `subprocess`, and `micropip.install()` are not available.
 - If a required library is unavailable, use an alternative approach with available modules. Do not attempt to install anything.
+- **Available:** the Python standard library + `numpy`, `pandas`, `matplotlib`, `seaborn`, `scikit-learn`, `scipy`, `sympy`, `regex`, `requests`, `beautifulsoup4`, `tiktoken`, `pytz`. **NOT available:** `torch`, `tensorflow`, `opencv`/`cv2`, `PIL`/`Pillow`, `psycopg2`, or anything needing native binaries. **To read or analyse an image, use `matplotlib.image.imread` + `numpy`** (PIL is not installed).
 
-##### Persistent File System
+##### Working with results
 
-- User-uploaded files are available at `/mnt/uploads/`. When the user asks you to work with their files, read from this directory.
-- You can also write output files to `/mnt/uploads/` so the user can access and download them from the file browser.
-- The file system persists across code executions within the same session.
-- Use `import os; os.listdir('/mnt/uploads')` to discover available files."""
+- **Always `print()` the results you want the user to see** (values, tables, summaries) — implicit expression results are not reliably surfaced.
+- **After the code runs, briefly interpret the output** — what it shows, any notable pattern, and a sensible next step. Don't hand back a bare number, table, or chart with no read on it.
+- If the code errors or the result looks wrong, fix it and re-run; iterate until the output is correct and meaningful. **But if a run reports "session disconnected", or the same error repeats two or three times, STOP** — report the problem and ask the user to keep the page open / retry, instead of calling the code interpreter over and over.
+
+##### Displaying plots and charts
+
+- **To show a plot/chart, call `plt.show()` — it renders the figure inline in the chat.** This is the default way to surface a visual; the user sees it immediately.
+- **Do NOT `savefig(...)` a plot unless the user explicitly asks for a downloadable image file.** Saving a figure does NOT display it; `plt.show()` does.
+
+##### Files — read them from /mnt/uploads
+
+- **When you run code, the files the user attached to the chat are placed in `/mnt/uploads/` for you.** **Always `import os; os.listdir('/mnt/uploads')` FIRST** to see what's there, then read the file directly by its real name — e.g. `pd.read_csv('/mnt/uploads/data.csv')` or `import matplotlib.image as mpimg; mpimg.imread('/mnt/uploads/photo.png')`. This is exact and works for files of any size, including binary files (images, PDFs).
+- **Do NOT hand-transcribe a file's data into code, and do NOT guess a filename or path** — list the directory and use the actual name. Match the file the user attached **in this message**: `/mnt/uploads` persists across chats, so it may also hold files from earlier sessions — don't just grab "the first CSV/PNG". If (and only if) `/mnt/uploads` is empty, an attached text file's contents may also appear in the conversation, which you may parse as a fallback — but reading from `/mnt/uploads` is preferred and is the only way to handle large or binary files.
+- **Images mount to `/mnt/uploads` like any other file** — list the directory and read the image from there (`import matplotlib.image as mpimg; mpimg.imread('/mnt/uploads/<name>')`). Only if an image is **not** in the listing (e.g. a temporary chat, or a pasted/data-URL image with no file) ask the user to add it via the **file panel** (the file-browser icon) so it lands in `/mnt/uploads`. **Never estimate or describe pixel values from seeing the image** — compute them from the file.
+- `/mnt/uploads/` is the chat's **file panel** — a browser-local store (IndexedDB), **NOT a path on the server's disk**: describe it that way. Files persist across runs in the same browser. Write a file there ONLY for a downloadable deliverable (e.g. a generated CSV), then tell the user it's in the file panel; for showing results, prefer printed/inline output and `plt.show()` over writing files.
+
+##### The displayed image — never rewrite or re-link it
+
+- When your code displays a figure (e.g. `plt.show()`), the environment shows it to the user automatically and the run result hands you a Markdown link of the form `![Output Image](/api/v1/files/<id>/content)`.
+- **That path is relative — copy it EXACTLY if you reference it. Never add a scheme or host (`http://`, `https://`), never turn it into a URL, and never invent a different path** — any rewrite breaks the image. When in doubt, do not re-embed it at all; it is already visible, so just describe the chart in words."""
 
 
 ####################################

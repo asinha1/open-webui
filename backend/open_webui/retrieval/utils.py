@@ -1251,7 +1251,23 @@ async def get_sources_from_items(
                     'metadatas': [[{'url': item.get('url'), 'name': item.get('url')}]],
                 }
         elif item.get('type') == 'file':
-            if item.get('context') == 'full' or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+            # [mh] (RE-APPLY ON MERGES) Skip images in the document-RAG path. An image has no
+            # extractable text (upload raises "File type image/* is not supported for processing"),
+            # so it would only yield an empty <source> tag + a fake citation + an extra query-gen
+            # call. It still reaches the model via the vision path AND the code-interpreter mount
+            # (metadata['files'] is read separately in middleware.py), so this only keeps junk
+            # empty sources out of the prompt for image-bearing chats. Pairs with the Chat.svelte
+            # image-filter relaxation that lets images into `files` for the /mnt/uploads mount.
+            _mh_f = item.get('file', {}) or {}
+            _mh_ct = (
+                (_mh_f.get('meta', {}) or {}).get('content_type')
+                or _mh_f.get('content_type')
+                or item.get('content_type')
+                or ''
+            )
+            if _mh_ct.startswith('image/'):
+                query_result = None
+            elif item.get('context') == 'full' or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
                 if item.get('file', {}).get('data', {}).get('content', ''):
                     # Manual Full Mode Toggle
                     # Used from chat file modal, we can assume that the file content will be available from item.get("file").get("data", {}).get("content")
