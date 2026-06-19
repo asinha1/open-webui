@@ -165,12 +165,24 @@ async def process_uploaded_file(
                 # Documents, or any file when an external engine is configured
                 if not content_type:
                     log.info(f'File type {file.content_type} is not provided, but trying to process anyway')
-                await process_file(
-                    request,
-                    ProcessFileForm(file_id=file_item.id),
-                    user=user,
-                    db=db_session,
-                )
+                # [mh] (RE-APPLY ON MERGES) Skip pypdf extraction for CHAT-attached PDFs (no knowledge_id):
+                # they're read on demand by the owned `read_pdf` tool (pdfplumber — leak-free, table-aware),
+                # so OWUI's leaky pypdf never runs on them and no unused content is stored. PDFs uploaded INTO
+                # a Knowledge base carry a knowledge_id and still extract + embed normally (untouched).
+                _mh_is_pdf = (content_type == 'application/pdf'
+                              or (file.filename or '').lower().endswith('.pdf'))
+                if _mh_is_pdf and not file_metadata.get('knowledge_id'):
+                    log.info(f'[mh] chat-attached PDF {file_item.id}: skipping pypdf extraction (read_pdf owns it)')
+                    await Files.update_file_data_by_id(
+                        file_item.id, {'status': 'completed'}, db=db_session,
+                    )
+                else:
+                    await process_file(
+                        request,
+                        ProcessFileForm(file_id=file_item.id),
+                        user=user,
+                        db=db_session,
+                    )
 
             # Auto-link to Knowledge Collection when uploaded from one (#24807).
             # Mirrors POST /knowledge/{id}/file/add so linking doesn't depend

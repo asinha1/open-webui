@@ -1265,7 +1265,11 @@ async def get_sources_from_items(
                 or item.get('content_type')
                 or ''
             )
-            if _mh_ct.startswith('image/'):
+            if (_mh_ct.startswith('image/') or _mh_ct == 'application/pdf'
+                    or (item.get('name') or '').lower().endswith('.pdf')):
+                # [mh] PDFs are also skipped: chat-attached PDFs are read by the owned `read_pdf` tool
+                # (pdfplumber, leak-free, table-aware) instead of pypdf auto-injection. The PDF stays in
+                # metadata['files'] so read_pdf (via __files__) still finds it. (KB PDFs are a different path.)
                 query_result = None
             elif item.get('context') == 'full' or request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
                 if item.get('file', {}).get('data', {}).get('content', ''):
