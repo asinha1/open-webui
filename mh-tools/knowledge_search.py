@@ -120,8 +120,15 @@ class Tools:
             "0854e216-8644-4d9e-95c3-d5f6727719e7",
             description="Chroma collection id of the knowledge base (== its KB id). Default = home-networking-repo.",
         )
+        REFERENCE_COLLECTION_IDS: str = Field(
+            "82a7c3ab-4d3e-4008-9123-c11c18bad8e5",
+            description="Comma-separated Chroma collection ids of reference:* KBs (e.g. reference:python), "
+                        "UNIONED into retrieval alongside KB_COLLECTION_ID. Shared + read-by-id (the home-repo "
+                        "pattern, NOT per-user research_search enumeration) so every user gets them. Blank = off.",
+        )
         KB_DESCRIPTION: str = Field(
-            "the operator's private home network + self-hosted services (devices, configs, incidents)",
+            "the operator's home network & self-hosted services (devices, configs, incidents) AND official "
+            "docs for the software the stack uses (Python libraries/frameworks, ops tools)",
             description="Short domain description, named in the actionable 'not in this KB' message.",
         )
         RELEVANCE_THRESHOLD: float = Field(
@@ -155,13 +162,15 @@ class Tools:
         __metadata__=None,
     ) -> str:
         """
-        Search the operator's private home-network / household knowledge base — devices (janus,
-        metis), self-hosted services, network/DNS/proxy configs, and incident write-ups. Use this
-        ONLY for questions about this specific home setup. Do NOT use it for general knowledge,
-        finance, news, current events, or anything not about the operator's own home network — it
-        has nothing on those, and a non-home-network query will return no relevant results.
+        Search the operator's loaded-in reference knowledge: (1) the private home-network / self-hosted
+        setup — devices (janus, metis), services, network/DNS/proxy configs, incident write-ups; AND
+        (2) official documentation for the software this stack is built on — Python libraries & frameworks
+        (e.g. pydantic, numpy, aiohttp, starlette, chromadb, pdfplumber, pillow) and ops tools. Use this
+        for questions about this home setup OR about how to use one of those specific libraries/APIs. Do
+        NOT use it for general knowledge, finance, news, current events, or libraries not in that set —
+        it has nothing on those and they return no relevant results (use web search for those instead).
 
-        :param query: a natural-language question about the home network / self-hosted services.
+        :param query: a natural-language question about the home setup or a library/API the stack uses.
         """
 
         async def emit_status(desc, done=False):
@@ -199,9 +208,12 @@ class Tools:
             if ef is None:
                 return ("The knowledge base is not configured (no embedding function). "
                         "Answer from your own knowledge or use web search.")
+            _ids = [self.valves.KB_COLLECTION_ID] + [
+                c.strip() for c in (self.valves.REFERENCE_COLLECTION_IDS or "").split(",") if c.strip()
+            ]
             res = await query_collection(
                 __request__,
-                [self.valves.KB_COLLECTION_ID],
+                _ids,
                 [query],
                 ef,
                 max(1, int(self.valves.K)),
