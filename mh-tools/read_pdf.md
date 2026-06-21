@@ -21,8 +21,36 @@ sage's statement parsers are built on. Owned tool > a Tika/Docling service (the 
 - Encrypted/owner-password PDFs: decrypt via **PyMuPDF** (`fitz`, a dep). A user-password PDF still needs the password.
 - `filename` disambiguates when several PDFs are attached.
 
+## Doubled-letter robustness (v1.2)
+Some PDFs render an overlaid double-stamped text layer that pdfplumber merges into doubled tokens
+(`"MMaannaaggee"` → `"Manage"`, and — observed on real Chase statements — whole **section headers** like
+`"AACCCCOOUUNNTT AACCTTIIVVIITTYY"` → `"ACCOUNT ACTIVITY"`). When the headers are garbled the model can't
+navigate the document (the live failure that drove this: it reported "no Account Services section" because
+the titles were doubled).
+
+**Why doc-level, not per-page (the v1.1 → v1.2 lesson):** the doubling is **scattered** — a few tokens per
+page in promo boxes / headers, *not* concentrated on one page. v1.1's per-page fraction gate (option C) only
+repaired the single densest page and left the rest garbled. v1.2 gates **doc-level**, applies **per-token**:
+
+1. Pass 1 — pull each page's `layout=True` text + tables and count doubled tokens across the **whole doc**
+   (`_count_doubled`, masking-guarded).
+2. If the doc total ≥ `DEDUP_MIN_TOKENS` (an overlaid layer is present), pass 2 char-collapses **every**
+   doubled token in **every** page's layout text + table cells (`_clean_doubled` — a regex sub that preserves
+   all spacing/columns and attached punctuation; only the letter run collapses). A clean doc (few/no doubled
+   tokens) is left untouched, so a stray repeated-pair string (e.g. a hex value) isn't collapsed.
+
+**Masking guard** (`_collapse_word`): skip collapse when the result is a single repeated char (`XXXX` → `XX`)
+— masking, not a doubled word. This is the one divergence from sage's verbatim `_collapse_doubled_chars`,
+which only ever feeds *detection* text (where `XXXX`→`XX` is harmless); ours feeds text the model reads as
+**data**. Helpers adapted from `~/repos/sage/src/sage/parsers/fingerprint.py` — copied, not imported (mh-tools
+can't import each other, and installing the sage package would pull `psycopg`/typer into the lean uv venv).
+A `[mh]` INFO log records `repaired N doubled-letter token(s) across M page(s)`. Validated on a real 4-page
+Chase statement: 39 doubled tokens repaired, **0 residual**, all section headers clean; in-UI confirmed.
+
 ## Valves
 - `MAX_CHARS` (50000) — cap on the returned content (token-budget guard).
+- `DEDUP_MIN_TOKENS` (4) — doc-level gate: minimum doubled-pattern tokens in the whole PDF before the repair
+  turns on (then it collapses every doubled token). Higher = more conservative; `0` disables the repair.
 
 ## Deps
 - **`pdfplumber`** + **`pymupdf`** — both installed in the venv + pinned in `pyproject.toml`/`backend/requirements.txt`. `pdfplumber` does text+tables; `pymupdf`/`fitz` decrypts encrypted/owner-password PDFs (e.g. bank statements). A PDF needing a *user* password to open still can't be read without it.
