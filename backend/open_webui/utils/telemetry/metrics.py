@@ -31,6 +31,7 @@ from open_webui.env import (
     OTEL_METRICS_EXPORTER_OTLP_ENDPOINT,
     OTEL_METRICS_EXPORTER_OTLP_INSECURE,
     OTEL_METRICS_OTLP_SPAN_EXPORTER,
+    OTEL_METRICS_PROMETHEUS_EXPORT_PORT,
     OTEL_SERVICE_NAME,
 )
 from open_webui.models.users import User
@@ -93,13 +94,45 @@ def _count_users_active_today(db_engine: Engine) -> Optional[int]:
 
 def _build_meter_provider(resource: Resource) -> MeterProvider:
     """Return a configured MeterProvider."""
+
+    # Views limit attribute cardinality (drop user-agent etc.). Shared by both
+    # the OTLP-push and the [mh] Prometheus-pull reader paths below.
+    views: List[View] = [
+        View(
+            instrument_name='http.server.duration',
+            attribute_keys=['http.method', 'http.route', 'http.status_code'],
+        ),
+        View(
+            instrument_name='http.server.requests',
+            attribute_keys=['http.method', 'http.route', 'http.status_code'],
+        ),
+        View(instrument_name='webui.users.total'),
+        View(instrument_name='webui.users.active'),
+        View(instrument_name='webui.users.active.today'),
+    ]
+
+    # [mh] Prometheus PULL mode: expose metrics on a dedicated loopback /metrics
+    # scrape endpoint (the HTTP server is started in setup_metrics) via a
+    # PrometheusMetricReader, instead of OTLP-pushing to a collector. Keeps OWUI
+    # a normal scrape target alongside the rest of the fleet
+    # (provisioning/observability/targets.yaml). Import is lazy so the OTLP path
+    # carries no hard dep on opentelemetry-exporter-prometheus.
+    if OTEL_METRICS_PROMETHEUS_EXPORT_PORT:
+        from opentelemetry.exporter.prometheus import PrometheusMetricReader
+
+        return MeterProvider(
+            resource=resource,
+            metric_readers=[PrometheusMetricReader()],
+            views=views,
+        )
+
     headers = []
     if OTEL_METRICS_BASIC_AUTH_USERNAME and OTEL_METRICS_BASIC_AUTH_PASSWORD:
         auth_string = f'{OTEL_METRICS_BASIC_AUTH_USERNAME}:{OTEL_METRICS_BASIC_AUTH_PASSWORD}'
         auth_header = b64encode(auth_string.encode()).decode()
         headers = [('authorization', f'Basic {auth_header}')]
 
-    # Periodic reader pushes metrics over OTLP/gRPC to collector
+    # Periodic reader pushes metrics over OTLP/gRPC (or HTTP) to a collector
     if OTEL_METRICS_OTLP_SPAN_EXPORTER == 'http':
         readers: List[PeriodicExportingMetricReader] = [
             PeriodicExportingMetricReader(
@@ -119,27 +152,6 @@ def _build_meter_provider(resource: Resource) -> MeterProvider:
             )
         ]
 
-    # Optional view to limit cardinality: drop user-agent etc.
-    views: List[View] = [
-        View(
-            instrument_name='http.server.duration',
-            attribute_keys=['http.method', 'http.route', 'http.status_code'],
-        ),
-        View(
-            instrument_name='http.server.requests',
-            attribute_keys=['http.method', 'http.route', 'http.status_code'],
-        ),
-        View(
-            instrument_name='webui.users.total',
-        ),
-        View(
-            instrument_name='webui.users.active',
-        ),
-        View(
-            instrument_name='webui.users.active.today',
-        ),
-    ]
-
     provider = MeterProvider(
         resource=resource,
         metric_readers=list(readers),
@@ -152,6 +164,28 @@ def setup_metrics(app: FastAPI, resource: Resource, db_engine: Engine) -> None:
     """Attach OTel metrics middleware to *app* and initialise provider."""
 
     metrics.set_meter_provider(_build_meter_provider(resource))
+
+    # [mh] In Prometheus-pull mode, expose the registry on a dedicated loopback
+    # scrape endpoint. PrometheusMetricReader (wired in _build_meter_provider)
+    # registers with prometheus_client's global REGISTRY; start_http_server then
+    # serves it. Loopback-only — never the tailnet — so it needs no auth; the
+    # Prometheus hub on this same host scrapes 127.0.0.1:<port>/metrics.
+    if OTEL_METRICS_PROMETHEUS_EXPORT_PORT:
+        try:
+            from prometheus_client import start_http_server
+
+            start_http_server(OTEL_METRICS_PROMETHEUS_EXPORT_PORT, addr='127.0.0.1')
+            logger.info(
+                '[mh] Prometheus metrics endpoint live on 127.0.0.1:%s/metrics',
+                OTEL_METRICS_PROMETHEUS_EXPORT_PORT,
+            )
+        except OSError:
+            # Port already bound (e.g. re-entry within one process) — non-fatal.
+            logger.warning(
+                '[mh] Prometheus metrics port %s already in use; skipping bind',
+                OTEL_METRICS_PROMETHEUS_EXPORT_PORT,
+            )
+
     meter = metrics.get_meter(__name__)
 
     # Instruments

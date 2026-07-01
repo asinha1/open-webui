@@ -163,3 +163,5 @@ opentelemetry-instrumentation-logging==0.61b0
 opentelemetry-instrumentation-httpx==0.61b0
 opentelemetry-instrumentation-aiohttp-client==0.61b0
 opentelemetry-instrumentation-system-metrics==0.61b0
+opentelemetry-exporter-prometheus==0.61b0    # [mh] Prometheus PULL exporter — loopback /metrics scrape endpoint (OTEL_METRICS_PROMETHEUS_EXPORT_PORT); see utils/telemetry/metrics.py
+prometheus-client==0.25.0                     # [mh] pulled in by the exporter above; declared because metrics.py imports start_http_server directly

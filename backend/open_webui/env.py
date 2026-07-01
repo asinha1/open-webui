@@ -1053,6 +1053,13 @@ OTEL_BASIC_AUTH_USERNAME = os.getenv('OTEL_BASIC_AUTH_USERNAME', '')
 OTEL_BASIC_AUTH_PASSWORD = os.getenv('OTEL_BASIC_AUTH_PASSWORD', '')
 OTEL_METRICS_EXPORT_INTERVAL_MILLIS = int(os.getenv('OTEL_METRICS_EXPORT_INTERVAL_MILLIS', '10000'))
 
+# [mh] Prometheus PULL exporter. When >0, OWUI exposes its OTel metrics on a
+# dedicated loopback 127.0.0.1:<port>/metrics scrape endpoint (via a
+# PrometheusMetricReader) instead of OTLP-pushing to a collector — so OWUI is a
+# normal scrape target in the fleet's pull-based Prometheus (provisioning/
+# observability/targets.yaml), visible to prometheus-audit.py. 0 = OTLP push.
+OTEL_METRICS_PROMETHEUS_EXPORT_PORT = int(os.getenv('OTEL_METRICS_PROMETHEUS_EXPORT_PORT', '0'))
+
 OTEL_METRICS_BASIC_AUTH_USERNAME = os.getenv('OTEL_METRICS_BASIC_AUTH_USERNAME', OTEL_BASIC_AUTH_USERNAME)
 OTEL_METRICS_BASIC_AUTH_PASSWORD = os.getenv('OTEL_METRICS_BASIC_AUTH_PASSWORD', OTEL_BASIC_AUTH_PASSWORD)
 OTEL_LOGS_BASIC_AUTH_USERNAME = os.getenv('OTEL_LOGS_BASIC_AUTH_USERNAME', OTEL_BASIC_AUTH_USERNAME)
