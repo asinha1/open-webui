@@ -46,6 +46,8 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument  # [mh] tool-usage metrics
+
 try:
     from bs4 import BeautifulSoup
 except ImportError:  # OWUI ships bs4; fallback keeps the tool alive if a build ever drops it
@@ -183,6 +185,7 @@ class Tools:
         # We emit our own citation event (Source chip), so tell OWUI not to auto-wrap.
         self.citation = True
 
+    @instrument("read_page", "web")
     async def read_page(
         self,
         url: str,

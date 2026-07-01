@@ -29,6 +29,8 @@ from typing import Optional, Literal
 import aiohttp
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument, governor_event  # [mh] tool-usage metrics
+
 log = logging.getLogger("mh.tavily_search")
 
 TAVILY_URL = "https://api.tavily.com/search"
@@ -185,6 +187,7 @@ class Tools:
         # We emit our own citation events (Source chips), so tell OWUI not to auto-wrap.
         self.citation = True
 
+    @instrument("tavily_search", "web")
     async def tavily_search(
         self,
         query: str,
@@ -223,6 +226,7 @@ class Tools:
             dup_note = _gov_near_dup(gov, query, self.valves.DEDUP_JACCARD)
             if dup_note is not None:
                 log.info("tavily_search governor: dedup chat=%s q=%r", chat_id, query[:80])
+                governor_event("dedup", "tavily_search")
                 await emit_status("Near-duplicate search — skipped (over-search guard).", done=True)
                 return dup_note
 
@@ -309,6 +313,7 @@ class Tools:
             nudge = _gov_nudge(gov, self.valves.READ_NUDGE_AFTER_K)
             if nudge:
                 out.append(nudge)
+                governor_event("read_nudge", "tavily_search")
 
         await emit_status(f"Found {len(results)} result(s).", done=True)
         return "\n\n".join(out)

@@ -39,6 +39,8 @@ import re
 
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument  # [mh] tool-usage metrics
+
 log = logging.getLogger("mh.read_pdf")
 
 # --- Doubled-letter repair (overlaid double-stamp layer) ---------------------------------------------
@@ -174,6 +176,7 @@ class Tools:
         self.valves = self.Valves()
         self.citation = True
 
+    @instrument("read_pdf", "local")
     async def read_pdf(
         self,
         filename: str = "",

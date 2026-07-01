@@ -35,6 +35,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument  # [mh] tool-usage metrics
+
 log = logging.getLogger("mh.knowledge_search")
 
 # ===== knowledge over-search governor — SEPARATE scope on the shared sys.modules sentinel ======
@@ -153,6 +155,7 @@ class Tools:
         self.valves = self.Valves()
         self.citation = True
 
+    @instrument("knowledge_search", "rag")
     async def knowledge_search(
         self,
         query: str,

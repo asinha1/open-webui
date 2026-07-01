@@ -35,6 +35,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument  # [mh] tool-usage metrics
+
 log = logging.getLogger("mh.export_document")
 
 # OWUI internals — available because this tool runs inside the OWUI process. Guarded so the
@@ -78,6 +80,7 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
 
+    @instrument("export_document", "local")
     async def export_document(
         self,
         content: str,

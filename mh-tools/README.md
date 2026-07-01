@@ -31,6 +31,7 @@ save_research.md     — its design rationale + acceptance criteria
 research_search.py   — the model-facing READ tool for the saved research:* collections (mirrors knowledge_search: query_collection + CRAG 0.69 + per-turn governor; surfaces each hit's source URL + saved_at). Separate from knowledge_search; unification long-term-open. Design: same RFC-MH-002 doc.
 research_search.md   — its design rationale + acceptance criteria
 research-topics.json — the curated topic registry / breadth-cap (seed domains: finance, health, cooking; new domains = an operator edit)
+redeploy.py          — [mh] push these .py into a running OWUI via the tools-update API (re-parse, NOT a raw webui.db swap); needs OWUI_API_KEY, then restart OWUI. Automates the manual re-paste in "How a tool gets into Open WebUI" below.
 ```
 
 Each tool = one `.py` (the OWUI Tool) + a `.md` spec.
@@ -56,3 +57,4 @@ When OWUI is dockerized (post-soak), the image build should **seed these tools i
 - **No new pip deps** when avoidable — prefer OWUI's venv (`aiohttp`, `requests`, `pydantic`).
 - Errors **degrade gracefully** into a model-readable string (auth/quota/timeout), never a stack trace.
 - Curated model-facing param surface (≤4–5 typed/enum args for 31B reliability); everything else is a Valve.
+- **Usage metrics:** wrap a tool's entry method with `@instrument("<tool>", "<web|rag|local>")` (from `open_webui.utils.telemetry.mh_tools`) → Prometheus `:9094` (`mh_tool_calls_total` / `mh_tool_duration_seconds`). Signature-transparent (`functools.wraps`), so the OWUI tool spec is unchanged. Visualized in the `mh-ai-stack` Grafana dashboard.

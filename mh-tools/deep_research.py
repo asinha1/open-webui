@@ -49,6 +49,8 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument, governor_event  # [mh] tool-usage metrics
+
 try:
     from bs4 import BeautifulSoup
 except ImportError:
@@ -245,6 +247,7 @@ class Tools:
         self.valves = self.Valves()
         self.citation = True
 
+    @instrument("deep_research", "web")
     async def deep_research(
         self,
         query: Optional[str] = None,
@@ -293,6 +296,7 @@ class Tools:
                 dup_note = _gov_near_dup(gov, query, self.valves.DEDUP_JACCARD)
                 if dup_note is not None:
                     log.info("deep_research governor: dedup chat=%s q=%r", chat_id, query[:80])
+                    governor_event("dedup", "deep_research")
                     await emit_status("Near-duplicate research query — skipped (over-search guard).", done=True)
                     return dup_note
             elif urls:
@@ -377,6 +381,7 @@ class Tools:
             nudge = _gov_nudge(gov, self.valves.READ_NUDGE_AFTER_K)
             if nudge:
                 digest += "\n" + nudge
+                governor_event("read_nudge", "deep_research")
         return digest
 
     @staticmethod

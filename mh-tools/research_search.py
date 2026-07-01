@@ -27,6 +27,8 @@ import types
 
 from pydantic import BaseModel, Field
 
+from open_webui.utils.telemetry.mh_tools import instrument  # [mh] tool-usage metrics
+
 log = logging.getLogger("mh.research_search")
 
 # ===== research over-search governor — SEPARATE scope (RCHAT) on the shared sentinel ============
@@ -130,6 +132,7 @@ class Tools:
         self.valves = self.Valves()
         self.citation = True
 
+    @instrument("research_search", "rag")
     async def research_search(
         self,
         query: str,
