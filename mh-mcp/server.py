@@ -107,16 +107,30 @@ def _bridge_refusal(ctx: Context):
                 "verify the caller's identity — refusing.")
 
 
+# login -> short display name for metric labels (operator preference: names, not emails).
+# Trust stays with the HEADER (tailscaled-derived, unspoofable); this only prettifies it.
+# Env: MH_USER_NAMES="login1=name1,login2=name2"; unmapped logins fall back to the
+# local-part of the login. Loopback has no header -> "local" (the operator's own machine).
+_USER_NAMES = {}
+for _pair in os.environ.get("MH_USER_NAMES", "aashish.sinha94@gmail.com=aashish").split(","):
+    if "=" in _pair:
+        _lg, _, _nm = _pair.partition("=")
+        _USER_NAMES[_lg.strip().lower()] = _nm.strip()
+
+
 def _caller_user(ctx: Context):
-    """User label for metrics attribution: 'local' for loopback callers, the caller's
-    Tailscale-User-Login for Serve-proxied tailnet requests, else 'unknown'.
-    Household-scale label cardinality by construction."""
+    """User label for metrics attribution: 'local' for loopback callers, a short name
+    (mapped from the tailscaled-injected Tailscale-User-Login) for Serve-proxied tailnet
+    requests, else 'unknown'. Household-scale label cardinality by construction."""
     try:
         req = ctx.request_context.request
         host = req.client.host if req.client else None
         if host in ("127.0.0.1", "::1"):
             return "local"
-        return req.headers.get("Tailscale-User-Login", "") or "unknown"
+        login = (req.headers.get("Tailscale-User-Login", "") or "").lower()
+        if not login:
+            return "unknown"
+        return _USER_NAMES.get(login) or login.partition("@")[0]
     except Exception:
         return "unknown"
 
