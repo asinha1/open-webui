@@ -24,12 +24,14 @@ except ImportError:
 
 _instruments = None
 _client_label = "unknown"
+_sessions_seen = set()
+_session_counter = None
 
 
 def init(port=None, client="mh-mcp", addr="127.0.0.1"):
     """Create the instruments (and optionally start a loopback /metrics exposition).
     Call once at process start; everything stays a no-op without it."""
-    global _instruments, _client_label
+    global _instruments, _client_label, _session_counter
     if not _PROM_OK:
         log.warning("prometheus-client unavailable — mh-grounding metrics off")
         return False
@@ -46,10 +48,41 @@ def init(port=None, client="mh-mcp", addr="127.0.0.1"):
                     "over-search governor actions (dedup / read-nudge)",
                     ["kind", "tool", "client"]),
         )
+        _session_counter = Counter(
+            "mh_mcp_sessions_total",
+            "distinct MCP client sessions seen since process start", ["client"])
+        _session_counter.labels(client=client)  # pre-create the 0 series (dashboards)
+        # Process self-health on darwin (prometheus_client's ProcessCollector needs /proc,
+        # absent on macOS) — CPU seconds + peak RSS via os/resource, cheap and dependency-free.
+        try:
+            import os as _os
+            import resource as _resource
+            from prometheus_client import Gauge
+            Gauge("mh_process_start_time_seconds",
+                  "process start time (unix)", ["client"]).labels(client=client).set(
+                __import__("time").time())
+            Gauge("mh_process_cpu_seconds",
+                  "user+system CPU seconds (os.times)", ["client"]).labels(
+                client=client).set_function(lambda: sum(_os.times()[:2]))
+            Gauge("mh_process_peak_rss_bytes",
+                  "peak resident set size (getrusage ru_maxrss)", ["client"]).labels(
+                client=client).set_function(
+                lambda: _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss)
+        except Exception as e:
+            log.warning("process self-metrics unavailable: %s", e)
     if port:
         start_http_server(int(port), addr=addr)
         log.info("mh-grounding metrics exposition on %s:%s", addr, port)
     return True
+
+
+def session_seen(session_key):
+    """Count a distinct MCP session the first time it appears (call from the server's
+    per-session plumbing; cheap set-dedup, cleared on restart like everything else)."""
+    if _session_counter is None or session_key in _sessions_seen:
+        return
+    _sessions_seen.add(session_key)
+    _session_counter.labels(client=_client_label).inc()
 
 
 def record_call(tool, cls, status, seconds):

@@ -91,7 +91,9 @@ def _session_gov(ctx: Context):
     its lifetime and the dedup set + search budget span tavily_search AND deep_research
     within it. Ephemeral (server restart clears — same as the OWUI store)."""
     try:
-        return gov_state(f"mcp-{id(ctx.session)}")
+        key = f"mcp-{id(ctx.session)}"
+        metrics.session_seen(key)
+        return gov_state(key)
     except Exception:
         return None
 
@@ -167,6 +169,7 @@ async def knowledge_search(query: str, ctx: Context) -> str:
     for general knowledge, news, or libraries outside that set (it returns nothing relevant;
     use tavily_search instead).
     """
+    metrics.session_seen(f"mcp-{id(ctx.session)}")
     gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "knowledge"))
     result = knowledge_mod.knowledge_query(query, cfg=knowledge_mod.KnowledgeConfig(), gov=gov)
     return result.text
@@ -181,6 +184,7 @@ async def research_search(query: str, ctx: Context) -> str:
     re-verify time-sensitive values (rates, prices) with the live web before relying on
     them. Use before searching the web on a topic the operator researches recurrently.
     """
+    metrics.session_seen(f"mcp-{id(ctx.session)}")
     gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "research"))
     result = knowledge_mod.research_query(query, cfg=knowledge_mod.KnowledgeConfig(), gov=gov)
     return result.text
