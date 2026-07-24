@@ -8,8 +8,10 @@ docstrings are tuned separately for the chat model. Keep this server small (≤ 
 tight descriptions): MCP schemas load upfront into every agent turn, and forge-26B pays
 that context tax.
 
-P1 scope: read_page only (+ /health + /metrics). P2 adds tavily_search + deep_research
-with the per-MCP-session governor. RAG tools are P3.
+P1: read_page (+ /health + /metrics). P2 (2026-07-24): tavily_search + deep_research with
+the per-MCP-session over-search governor — one session = one persistent MCP connection
+(a Goose session), keyed on id(ctx.session); dedup + read-nudge span both tools within a
+session, mirroring the OWUI per-chat behavior. RAG tools are P3.
 
 Run (see README.md / the launchd plist):
     .venv/bin/python server.py
@@ -40,18 +42,32 @@ logging.basicConfig(
 )
 log = logging.getLogger("mh.mcp")
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import PlainTextResponse, Response  # noqa: E402
 
 from mh_grounding import __version__ as GROUNDING_VERSION  # noqa: E402
-from mh_grounding import fetch, metrics  # noqa: E402
+from mh_grounding import fetch, metrics, research as research_mod, tavily as tavily_mod  # noqa: E402
+from mh_grounding.governor import gov_state  # noqa: E402
 
 # Instruments only (no separate exposition port) — /metrics is served on THIS port
 # below, matching the port registry's `metrics: self` idiom.
 metrics.init(port=None, client="mh-mcp")
 
+TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
+
 mcp = FastMCP("mh-grounding", host=HOST, port=PORT)
+
+
+def _session_gov(ctx: Context):
+    """Per-MCP-session governor state — the agent-path analog of OWUI's per-chat key.
+    One Goose session holds one persistent connection, so id(ctx.session) is stable for
+    its lifetime and the dedup set + search budget span tavily_search AND deep_research
+    within it. Ephemeral (server restart clears — same as the OWUI store)."""
+    try:
+        return gov_state(f"mcp-{id(ctx.session)}")
+    except Exception:
+        return None
 
 
 @mcp.tool()
@@ -71,6 +87,45 @@ async def read_page(url: str, max_chars: int | None = None) -> str:
             like a full feed/episode list).
     """
     result = await fetch.read_url(url, max_chars=max_chars, cfg=fetch.FetchConfig())
+    return result.text
+
+
+@mcp.tool()
+@metrics.instrument("tavily_search", "web")
+async def tavily_search(query: str, ctx: Context, depth: str = "deep",
+                        topic: str = "general", recency: str | None = None) -> str:
+    """Search the live web — news, current versions, changelogs, statistics, anything past
+    your training data or that you can't state with certainty. Prefer this over guessing;
+    prefer read_page over re-searching once you have a promising URL. depth: "deep" for
+    research-grade context (costs more), "quick" for a single-fact lookup. topic: "news"
+    for current events (biases recent reputable sources), else "general". recency:
+    optional window "day"|"week"|"month"|"year" (pair with topic="news").
+    """
+    result = await tavily_mod.search(
+        query, depth=depth, topic=topic, recency=recency,
+        cfg=tavily_mod.TavilyConfig(TAVILY_API_KEY=TAVILY_KEY),
+        gov=_session_gov(ctx),
+        on_gov_event=lambda kind: metrics.governor_event(kind, "tavily_search"),
+    )
+    return result.text
+
+
+@mcp.tool()
+@metrics.instrument("deep_research", "web")
+async def deep_research(ctx: Context, query: str | None = None,
+                        urls: list[str] | None = None, max_sources: int = 5) -> str:
+    """Research a topic across SEVERAL web pages in one step — they are read in parallel and
+    returned as one consolidated digest to synthesize from. Use when multiple sources serve
+    one question; use read_page for a single known page, tavily_search for plain discovery.
+    Provide EITHER urls (read exactly those) OR query (search, then read the top results).
+    Cite the digest's sources; unread sources are reported as failures, never invented.
+    """
+    result = await research_mod.research(
+        query=query, urls=urls, max_sources=max_sources,
+        cfg=research_mod.ResearchConfig(TAVILY_API_KEY=TAVILY_KEY),
+        gov=_session_gov(ctx),
+        on_gov_event=lambda kind: metrics.governor_event(kind, "deep_research"),
+    )
     return result.text
 
 

@@ -35,7 +35,7 @@ read_page.py         — fetch one URL/feed → full readable body; JS-gated pag
 read_page.md         — its design rationale + acceptance criteria
 export_document.py   — render the model's content to a downloadable .md/.pdf file + return a download link (markdown + fpdf2; no new dep)
 export_document.md   — its design rationale + acceptance criteria
-deep_research.py     — read several sources in parallel (urls, or query→search→read) and return one consolidated digest (v1.3+: governor + markdown plumbing from mh_grounding; keeps its own digest-surface fetch)
+deep_research.py     — read several sources in parallel (urls, or query→search→read) and return one consolidated digest (v1.4+: OWUI wrapper over mh_grounding.research — the full digest core is lib-shared with mh-mcp)
 deep_research.md     — its design rationale + acceptance criteria
 knowledge_search.py  — owned, governed RAG over the home-network KB (replaces OWUI's built-in; CRAG relevance grade + a per-turn empty-loop guard; RFC-MH-001)
 knowledge_search.md  — its design rationale + acceptance criteria
