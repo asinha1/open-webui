@@ -15,6 +15,9 @@ dependencies = [
 render = ["playwright"]
 # Prometheus exposition for out-of-OWUI processes (mh-mcp). OWUI keeps its own OTel decorator.
 metrics = ["prometheus-client"]
+# Agent-path RAG (P3): read-only chroma + the OWUI-matching embedder. PIN chromadb to
+# the OWUI venv version (on-disk format) — 1.5.2 at build.
+rag = ["chromadb==1.5.2", "sentence-transformers==5.4.0"]
 
 [build-system]
 requires = ["setuptools>=68"]

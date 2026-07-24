@@ -47,7 +47,7 @@ from starlette.requests import Request  # noqa: E402
 from starlette.responses import PlainTextResponse, Response  # noqa: E402
 
 from mh_grounding import __version__ as GROUNDING_VERSION  # noqa: E402
-from mh_grounding import fetch, metrics, research as research_mod, tavily as tavily_mod  # noqa: E402
+from mh_grounding import fetch, knowledge as knowledge_mod, metrics, research as research_mod, tavily as tavily_mod  # noqa: E402
 from mh_grounding.governor import gov_state  # noqa: E402
 
 # Instruments only (no separate exposition port) — /metrics is served on THIS port
@@ -126,6 +126,37 @@ async def deep_research(ctx: Context, query: str | None = None,
         gov=_session_gov(ctx),
         on_gov_event=lambda kind: metrics.governor_event(kind, "deep_research"),
     )
+    return result.text
+
+
+@mcp.tool()
+@metrics.instrument("knowledge_search", "rag")
+async def knowledge_search(query: str, ctx: Context) -> str:
+    """Search the operator's loaded-in reference knowledge: (1) the private home-network /
+    self-hosted setup — devices (janus, metis, hephaestus), services, network/DNS/proxy
+    configs, incident write-ups; AND (2) official documentation for the software this stack
+    uses — Python libraries & frameworks (e.g. pydantic, numpy, aiohttp, starlette, chromadb,
+    pdfplumber, pillow) and ops tools. Use it for questions about this home setup OR how to
+    use one of those specific libraries/APIs — it beats the open web for both. Do NOT use it
+    for general knowledge, news, or libraries outside that set (it returns nothing relevant;
+    use tavily_search instead).
+    """
+    gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "knowledge"))
+    result = knowledge_mod.knowledge_query(query, cfg=knowledge_mod.KnowledgeConfig(), gov=gov)
+    return result.text
+
+
+@mcp.tool()
+@metrics.instrument("research_search", "rag")
+async def research_search(query: str, ctx: Context) -> str:
+    """Search the operator's SAVED web research — pages previously read and deliberately
+    saved into per-topic research collections (finance, health, cooking, …). Each hit
+    carries its source URL and saved-at date: these are SNAPSHOTS, so flag their age and
+    re-verify time-sensitive values (rates, prices) with the live web before relying on
+    them. Use before searching the web on a topic the operator researches recurrently.
+    """
+    gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "research"))
+    result = knowledge_mod.research_query(query, cfg=knowledge_mod.KnowledgeConfig(), gov=gov)
     return result.text
 
 

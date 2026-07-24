@@ -1,9 +1,12 @@
 # mh-mcp — agent-facing MCP server (RFC-MH-005)
 
 The grounding tools as a **streamable-HTTP MCP server** on `127.0.0.1:8090`, for the
-desktop agent (Goose) and any future MCP client. Serves (P2, 2026-07-24): `read_page`,
-`tavily_search`, `deep_research` — with the **per-MCP-session over-search governor**
-(one agent session = one cross-tool dedup set + search budget, keyed on the MCP session). Logic lives in `../mh-grounding/` —
+desktop agent (Goose) and any future MCP client. Serves (P3, 2026-07-24): `read_page`,
+`tavily_search`, `deep_research`, `knowledge_search`, `research_search` — the web tools
+under the **per-MCP-session over-search governor** (one agent session = one cross-tool
+dedup set + search budget), the RAG tools as **read-only** retrieval over OWUI's Chroma
+store (chromadb PINNED to OWUI's version — on-disk format; ALL writes stay in OWUI;
+install the lib's `[rag]` extra). Logic lives in `../mh-grounding/` —
 the same library the OWUI `mh-tools/` wrap; this file is only the agent-facing surface.
 Plan + phasing: `home_networking/provisioning/hephaestus/tooling-research/mcp-promotion-plan.md`.
 
