@@ -64,7 +64,21 @@ OWUI_API_KEY = os.environ.get("OWUI_API_KEY", "")
 # Tailscale Serve). Anything else — including an undeterminable caller — is REFUSED.
 OPERATOR_LOGIN = os.environ.get("MH_OPERATOR_LOGIN", "aashish.sinha94@gmail.com")
 
-mcp = FastMCP("mh-grounding", host=HOST, port=PORT)
+# DNS-rebinding protection (the spec's Origin/Host validation — the SDK enforces it with
+# 421s). Loopback identities plus the Tailscale Serve hostname; extend via MH_MCP_ALLOWED_HOSTS
+# (comma-separated host:port) if the serve name ever changes.
+from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
+_SERVE_HOST = os.environ.get("MH_MCP_SERVE_HOST", "hephaestus.tail31d045.ts.net:8443")
+_ALLOWED_HOSTS = [f"127.0.0.1:{PORT}", f"localhost:{PORT}", _SERVE_HOST] + [
+    h.strip() for h in os.environ.get("MH_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=_ALLOWED_HOSTS,
+    allowed_origins=[f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}",
+                     f"https://{_SERVE_HOST}"],
+)
+
+mcp = FastMCP("mh-grounding", host=HOST, port=PORT, transport_security=_security)
 
 # Tool annotations (MCP spec): client-UI hints — NOT model-visible, zero context
 # cost; correct-by-construction for approval gating in clients that honor them.
