@@ -107,6 +107,23 @@ def _bridge_refusal(ctx: Context):
                 "verify the caller's identity — refusing.")
 
 
+def _caller_user(ctx: Context):
+    """User label for metrics attribution: 'local' for loopback callers, the caller's
+    Tailscale-User-Login for Serve-proxied tailnet requests, else 'unknown'.
+    Household-scale label cardinality by construction."""
+    try:
+        req = ctx.request_context.request
+        host = req.client.host if req.client else None
+        if host in ("127.0.0.1", "::1"):
+            return "local"
+        return req.headers.get("Tailscale-User-Login", "") or "unknown"
+    except Exception:
+        return "unknown"
+
+
+metrics.set_user_resolver(_caller_user)
+
+
 def _session_gov(ctx: Context):
     """Per-MCP-session governor state — the agent-path analog of OWUI's per-chat key.
     One Goose session holds one persistent connection, so id(ctx.session) is stable for
@@ -122,7 +139,7 @@ def _session_gov(ctx: Context):
 
 @mcp.tool(annotations=_RO_OPEN)
 @metrics.instrument("read_page", "web")
-async def read_page(url: str, max_chars: int | None = None) -> str:
+async def read_page(url: str, ctx: Context = None, max_chars: int | None = None) -> str:
     """Read a web page, article, doc page, or RSS/Atom feed and return it as Markdown
     (links preserved, so you can follow one by calling read_page again). USE THIS TO
     VERIFY before you state: a URL you are about to cite, a version number, an API's
@@ -155,7 +172,7 @@ async def tavily_search(query: str, ctx: Context, depth: str = "deep",
         query, depth=depth, topic=topic, recency=recency,
         cfg=tavily_mod.TavilyConfig(TAVILY_API_KEY=TAVILY_KEY),
         gov=_session_gov(ctx),
-        on_gov_event=lambda kind: metrics.governor_event(kind, "tavily_search"),
+        on_gov_event=lambda kind: metrics.governor_event(kind, "tavily_search", user=_caller_user(ctx)),
     )
     return result.text
 
@@ -174,7 +191,7 @@ async def deep_research(ctx: Context, query: str | None = None,
         query=query, urls=urls, max_sources=max_sources,
         cfg=research_mod.ResearchConfig(TAVILY_API_KEY=TAVILY_KEY),
         gov=_session_gov(ctx),
-        on_gov_event=lambda kind: metrics.governor_event(kind, "deep_research"),
+        on_gov_event=lambda kind: metrics.governor_event(kind, "deep_research", user=_caller_user(ctx)),
     )
     return result.text
 

@@ -40,13 +40,13 @@ def init(port=None, client="mh-mcp", addr="127.0.0.1"):
         _instruments = (
             Counter("mh_tool_calls_total",
                     "mh-tool invocations, tagged tool/class/status",
-                    ["tool", "class", "status", "client"]),
+                    ["tool", "class", "status", "client", "user"]),
             Histogram("mh_tool_duration_seconds",
                       "mh-tool wall-clock duration",
-                      ["tool", "class", "client"]),
+                      ["tool", "class", "client", "user"]),
             Counter("mh_governor_events_total",
                     "over-search governor actions (dedup / read-nudge)",
-                    ["kind", "tool", "client"]),
+                    ["kind", "tool", "client", "user"]),
         )
         _session_counter = Counter(
             "mh_mcp_sessions_total",
@@ -85,24 +85,47 @@ def session_seen(session_key):
     _session_counter.labels(client=_client_label).inc()
 
 
-def record_call(tool, cls, status, seconds):
+# Per-call USER attribution (household-scale cardinality). The serving layer registers a
+# resolver mapping a tool's Context -> a user label ("local" for loopback; the caller's
+# Tailscale-User-Login for Serve-proxied requests). Unresolvable -> "unknown".
+_user_resolver = None
+
+
+def set_user_resolver(fn):
+    global _user_resolver
+    _user_resolver = fn
+
+
+def _resolve_user(kwargs):
+    if _user_resolver is None:
+        return ""
+    try:
+        ctx = kwargs.get("ctx")
+        return _user_resolver(ctx) if ctx is not None else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def record_call(tool, cls, status, seconds, user=""):
     if _instruments is None:
         return
     counter, hist, _ = _instruments
-    hist.labels(tool=tool, **{"class": cls}, client=_client_label).observe(seconds)
-    counter.labels(tool=tool, **{"class": cls}, status=status, client=_client_label).inc()
+    hist.labels(tool=tool, **{"class": cls}, client=_client_label, user=user).observe(seconds)
+    counter.labels(tool=tool, **{"class": cls}, status=status, client=_client_label,
+                   user=user).inc()
 
 
-def governor_event(kind, tool):
+def governor_event(kind, tool, user=""):
     if _instruments is None:
         return
-    _instruments[2].labels(kind=kind, tool=tool, client=_client_label).inc()
+    _instruments[2].labels(kind=kind, tool=tool, client=_client_label, user=user).inc()
 
 
 def instrument(tool, cls):
     """Decorator for an async tool entry point: counts + times the call, mirroring the
     OWUI-side semantics (errors degrade into model-readable strings, so status="error"
-    captures only true exceptions)."""
+    captures only true exceptions). If the tool takes a Context kwarg and a user resolver
+    is registered, calls are attributed per user."""
     def deco(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -114,6 +137,7 @@ def instrument(tool, cls):
                 status = "error"
                 raise
             finally:
-                record_call(tool, cls, status, time.perf_counter() - start)
+                record_call(tool, cls, status, time.perf_counter() - start,
+                            user=_resolve_user(kwargs))
         return wrapper
     return deco
