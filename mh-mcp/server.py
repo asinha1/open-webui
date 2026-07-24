@@ -54,6 +54,7 @@ from mh_grounding.governor import gov_state  # noqa: E402
 # Instruments only (no separate exposition port) — /metrics is served on THIS port
 # below, matching the port registry's `metrics: self` idiom.
 metrics.init(port=None, client="mh-mcp")
+metrics.init_audit(os.environ.get("MH_MCP_AUDIT_DIR", "~/service-data/mh-mcp/audit"))
 
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
 OWUI_API_BASE = os.environ.get("OWUI_API_BASE", "http://100.100.81.77:8080")

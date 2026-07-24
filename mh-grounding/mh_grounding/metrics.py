@@ -106,6 +106,54 @@ def _resolve_user(kwargs):
         return "unknown"
 
 
+# ---- audit journal (household-agent auditability) ---------------------------------
+# Append-only JSONL, one file per day, written at the same choke point as the metrics.
+# Purpose: "what did the household's agents actually do" — user, session, tool, args
+# (truncated), outcome. Designed for later CENTRALIZATION: plain JSONL is collector-
+# friendly (ship/ingest wherever); the OWUI face already has webui.db as its record.
+_audit_dir = None
+
+
+def _audit_record(tool, cls, status, seconds, kwargs, result):
+    if _audit_dir is None:
+        return
+    try:
+        import datetime
+        import json as _json
+        ctx = kwargs.get("ctx")
+        args = {}
+        for k, v in kwargs.items():
+            if k == "ctx" or k.startswith("_"):
+                continue
+            s = v if isinstance(v, (int, float, bool, type(None))) else str(v)
+            if isinstance(s, str) and len(s) > 300:
+                s = s[:300] + f"…(+{len(s)-300})"
+            args[k] = s
+        line = {
+            "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "user": _resolve_user(kwargs),
+            "session": f"mcp-{id(ctx.session)}" if ctx is not None else "",
+            "tool": tool, "class": cls, "status": status, "dt": round(seconds, 2),
+            "args": args,
+            "result_chars": len(result) if isinstance(result, str) else None,
+        }
+        day = datetime.date.today().strftime("%Y%m%d")
+        path = _audit_dir / f"audit-{day}.jsonl"
+        with open(path, "a") as f:
+            f.write(_json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("audit record failed: %s", e)
+
+
+def init_audit(directory):
+    """Enable the audit journal (a directory for daily JSONL files)."""
+    global _audit_dir
+    from pathlib import Path as _Path
+    _audit_dir = _Path(directory).expanduser()
+    _audit_dir.mkdir(parents=True, exist_ok=True)
+    log.info("audit journal at %s", _audit_dir)
+
+
 def record_call(tool, cls, status, seconds, user=""):
     if _instruments is None:
         return
@@ -131,13 +179,16 @@ def instrument(tool, cls):
         async def wrapper(*args, **kwargs):
             start = time.perf_counter()
             status = "ok"
+            result = None
             try:
-                return await fn(*args, **kwargs)
+                result = await fn(*args, **kwargs)
+                return result
             except Exception:
                 status = "error"
                 raise
             finally:
-                record_call(tool, cls, status, time.perf_counter() - start,
-                            user=_resolve_user(kwargs))
+                elapsed = time.perf_counter() - start
+                record_call(tool, cls, status, elapsed, user=_resolve_user(kwargs))
+                _audit_record(tool, cls, status, elapsed, kwargs, result)
         return wrapper
     return deco
