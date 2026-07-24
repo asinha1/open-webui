@@ -43,6 +43,7 @@ logging.basicConfig(
 log = logging.getLogger("mh.mcp")
 
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
+from mcp.types import ToolAnnotations  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import PlainTextResponse, Response  # noqa: E402
 
@@ -64,6 +65,13 @@ OWUI_API_KEY = os.environ.get("OWUI_API_KEY", "")
 OPERATOR_LOGIN = os.environ.get("MH_OPERATOR_LOGIN", "aashish.sinha94@gmail.com")
 
 mcp = FastMCP("mh-grounding", host=HOST, port=PORT)
+
+# Tool annotations (MCP spec): client-UI hints — NOT model-visible, zero context
+# cost; correct-by-construction for approval gating in clients that honor them.
+_RO_OPEN = ToolAnnotations(readOnlyHint=True, openWorldHint=True)     # web readers
+_RO_CLOSED = ToolAnnotations(readOnlyHint=True, openWorldHint=False)  # local RAG/bridge reads
+_WRITE_LOCAL = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                               idempotentHint=False, openWorldHint=False)  # note create
 
 
 def _bridge_refusal(ctx: Context):
@@ -98,7 +106,7 @@ def _session_gov(ctx: Context):
         return None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_OPEN)
 @metrics.instrument("read_page", "web")
 async def read_page(url: str, max_chars: int | None = None) -> str:
     """Read a web page, article, doc page, or RSS/Atom feed and return it as Markdown
@@ -118,7 +126,7 @@ async def read_page(url: str, max_chars: int | None = None) -> str:
     return result.text
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_OPEN)
 @metrics.instrument("tavily_search", "web")
 async def tavily_search(query: str, ctx: Context, depth: str = "deep",
                         topic: str = "general", recency: str | None = None) -> str:
@@ -138,7 +146,7 @@ async def tavily_search(query: str, ctx: Context, depth: str = "deep",
     return result.text
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_OPEN)
 @metrics.instrument("deep_research", "web")
 async def deep_research(ctx: Context, query: str | None = None,
                         urls: list[str] | None = None, max_sources: int = 5) -> str:
@@ -157,7 +165,7 @@ async def deep_research(ctx: Context, query: str | None = None,
     return result.text
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_CLOSED)
 @metrics.instrument("knowledge_search", "rag")
 async def knowledge_search(query: str, ctx: Context) -> str:
     """Search the operator's loaded-in reference knowledge: (1) the private home-network /
@@ -175,7 +183,7 @@ async def knowledge_search(query: str, ctx: Context) -> str:
     return result.text
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_CLOSED)
 @metrics.instrument("research_search", "rag")
 async def research_search(query: str, ctx: Context) -> str:
     """Search the operator's SAVED web research — pages previously read and deliberately
@@ -190,7 +198,7 @@ async def research_search(query: str, ctx: Context) -> str:
     return result.text
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_CLOSED)
 @metrics.instrument("owui_chat", "local")
 async def owui_chat(ctx: Context, chat_id: str | None = None, recent: int = 10) -> str:
     """Read the operator's Open WebUI chats — the planning/research done on the phone or in
@@ -216,7 +224,7 @@ async def owui_chat(ctx: Context, chat_id: str | None = None, recent: int = 10) 
     return "Recent OWUI chats (id · title · updated):\n" + "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE_LOCAL)
 @metrics.instrument("save_owui_note", "local")
 async def save_owui_note(ctx: Context, title: str, markdown: str) -> str:
     """Save a document into the operator's Open WebUI Notes — the write-back half of the
