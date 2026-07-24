@@ -1,0 +1,24 @@
+[project]
+name = "mh-grounding"
+version = "0.1.0"
+description = "Shared grounding core for the mh-tools (OWUI) and mh-mcp (agent) surfaces: SSRF-guarded fetch/render, Tavily search, over-search governor, CRAG RAG."
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp",
+    "beautifulsoup4",
+    "markdownify",
+    "certifi",
+]
+
+[project.optional-dependencies]
+# The JS-render escalation (headless Chromium). Heavy; the lib degrades it off when absent.
+render = ["playwright"]
+# Prometheus exposition for out-of-OWUI processes (mh-mcp). OWUI keeps its own OTel decorator.
+metrics = ["prometheus-client"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mh_grounding*"]

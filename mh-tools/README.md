@@ -13,16 +13,29 @@ OWUI loads tools from `webui.db`, not the filesystem — so the repo choice is p
 
 Tool param surfaces here are designed to **map 1:1 to a future MCP tool**, so promotion is mechanical.
 
+**The promotion happened (RFC-MH-005 P1, 2026-07-23) — as a shared CORE, not a move.** The grounding
+logic (fetch/SSRF/render, Tavily, the over-search governor) now lives in **`../mh-grounding/`** (an
+installable package), consumed by BOTH surfaces: the `mh-tools` wrappers here (OWUI: docstrings, Valves,
+events, `__chat_id__` glue) and the **`../mh-mcp/`** streamable-HTTP server (`127.0.0.1:8090`, LaunchAgent
+`com.maisonhanover.mh-mcp`) serving the desktop agent (Goose). Consequences:
+- `read_page` / `tavily_search` / `deep_research` are **no longer self-contained** — the OWUI venv needs
+  `uv pip install -e mh-grounding` **before** they load (a fresh-provision step).
+- **Lib-logic changes take effect on OWUI restart** (no DB re-deploy); only changes to a wrapper file's
+  surface (docstring/Valves/params) still need the tools-update-API re-parse (`redeploy.py`).
+- The formerly byte-mirrored governor block (tavily_search ⇄ deep_research) is gone — single copy in
+  `mh_grounding/governor.py`, same `sys.modules` store, so cross-tool state + eval-harness introspection
+  are unchanged.
+
 ## Contents
 
 ```
-tavily_search.py     — web search (Tavily REST via aiohttp; no SDK dep)
+tavily_search.py     — web search (v1.3+: OWUI wrapper over mh_grounding.tavily — search + governor live in the lib)
 tavily_search.md     — its design rationale + acceptance criteria
-read_page.py         — fetch one URL/feed → full readable body; escalates JS-gated pages to a headless-Chromium render INTERNALLY (v1.4 fold of the former render_page; SSRF-guarded; dep: playwright + chromium)
+read_page.py         — fetch one URL/feed → full readable body; JS-gated pages escalate to a headless-Chromium render internally (v1.5+: OWUI wrapper over mh_grounding.fetch; dep: playwright + chromium)
 read_page.md         — its design rationale + acceptance criteria
 export_document.py   — render the model's content to a downloadable .md/.pdf file + return a download link (markdown + fpdf2; no new dep)
 export_document.md   — its design rationale + acceptance criteria
-deep_research.py     — read several sources in parallel (urls, or query→search→read) and return one consolidated digest (parallel tool-I/O, single-pass synthesis; SSRF-guarded; no new dep)
+deep_research.py     — read several sources in parallel (urls, or query→search→read) and return one consolidated digest (v1.3+: governor + markdown plumbing from mh_grounding; keeps its own digest-surface fetch)
 deep_research.md     — its design rationale + acceptance criteria
 knowledge_search.py  — owned, governed RAG over the home-network KB (replaces OWUI's built-in; CRAG relevance grade + a per-turn empty-loop guard; RFC-MH-001)
 knowledge_search.md  — its design rationale + acceptance criteria

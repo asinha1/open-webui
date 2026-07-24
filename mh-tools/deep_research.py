@@ -1,48 +1,37 @@
 """
 title: Deep Research
 author: mh-tools
-version: 1.2.0
+version: 1.3.0
 required_open_webui_version: 0.4.0
 """
 # Custom OWUI tool — version-controlled in the open-webui fork under mh-tools/.
 # Reads SEVERAL sources at once and returns one consolidated digest, so the model can research a
-# topic across many pages in a single turn instead of reading them one-by-one. Closes the gap the
-# 2026-06-06 readout surfaced (the 4-article ingestion chat read pages sequentially).
+# topic across many pages in a single turn instead of reading them one-by-one.
 #
 # THE PARALLELISM IS TOOL-I/O, NOT INFERENCE. The conversation runs on one llama-server slot
 # (--parallel 1, deliberate). You cannot run multiple Gemma generations at once — but you CAN fetch
 # N pages concurrently (I/O-bound) and hand the model ONE digest to synthesize in a single pass.
-# That also sidesteps Gemma's native-FC parallel-call unreliability: the model makes ONE tool call;
-# the fan-out is deterministic code here. And it's CACHE-FRIENDLIER than N sequential read turns —
-# one prefill of the digest at the end of context, not N re-prefills (the two-pass-FC cost).
 #
 # Two modes: pass `urls` (read exactly those, in parallel) or `query` (search the web, then read the
-# top results in parallel). Reuses read_page's SSRF guard + certifi TLS + markdownify render; query
-# mode reuses the tavily_search REST call (key in this tool's Valves). Deployed via Workspace ->
-# Tools, then RESTART OWUI. Design + acceptance: mh-tools/deep_research.md.
+# top results in parallel). Deployed via Workspace -> Tools, then RESTART OWUI. Design + acceptance:
+# mh-tools/deep_research.md.
 #
-# v1.1.0 (2026-06-08): when sources can't be read, the digest ROUTES the model to the right next
-# action instead of inviting a reworded re-search — JS-gated -> "open it with the JavaScript-capable
-# reader"; access-blocked (401/403/429) -> "read a different authoritative source", not "search
-# again". Part of the v10 over-search/under-read fix (system-prompt-v10-research.md). Signature same.
-#
-# v1.2.0 (2026-06-12): joins the CROSS-TOOL over-search governor (Thread #2). `query` mode is a web
-#   SEARCH, so it shares tavily_search's per-chat dedup + budget (a query that repeats a prior
-#   tavily/deep_research search is skipped; the escalating read-nudge counts deep_research queries
-#   toward the combined budget). `urls` mode is a READ — never deduped; its URLs are noted as
-#   "reading happened". Closes the v1.1 escape hatch where the model fled the tavily governor into
-#   the ungoverned deep_research (probe 10c). The shared block below is MIRRORED byte-for-byte in
-#   tavily_search.py — keep the two copies in sync.
+# v1.3.0 (2026-07-23, RFC-MH-005 P1): LIB-BACKED. The mirrored governor block is GONE — the single
+#   copy lives in mh_grounding.governor (same sys.modules store, so cross-tool state + the eval
+#   harness's introspection point are unchanged). The markdown/decode/UA/TLS plumbing now imports
+#   from mh_grounding.fetch. This tool KEEPS its own _fetch_render/_url_refusal: they return short
+#   problem REASONS for the digest's failure list (a deliberately different surface from read_page's
+#   model-facing refusal strings). Behavior + strings byte-identical to v1.2. NOTE: no longer
+#   self-contained — needs `mh-grounding` installed in the OWUI venv; lib changes take effect on
+#   OWUI restart, surface changes here still need the tools-update-API re-parse.
+# v1.2.0: joined the CROSS-TOOL over-search governor (query mode = a governed search; urls mode =
+#   a read, noted never deduped). v1.1.0: failure routing (JS-gated -> the JS reader; blocked ->
+#   different source), part of the v10 over-search/under-read fix.
 
 import asyncio
 import ipaddress
 import logging
-import re
 import socket
-import ssl
-import sys
-import types
-from html import unescape
 from typing import Optional
 from urllib.parse import urljoin, urlsplit
 
@@ -51,162 +40,25 @@ from pydantic import BaseModel, Field
 
 from open_webui.utils.telemetry.mh_tools import instrument, governor_event  # [mh] tool-usage metrics
 
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
-
-try:
-    from markdownify import MarkdownConverter
-except ImportError:
-    MarkdownConverter = None
-
-try:
-    import certifi
-    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-except Exception:
-    _SSL_CONTEXT = None
+from mh_grounding.fetch import (
+    SSL_CONTEXT as _SSL_CONTEXT,
+    UA as _UA,
+    decode_bytes as _decode,
+    html_to_markdown as _html_to_markdown,
+)
+from mh_grounding.governor import (
+    gov_near_dup as _gov_near_dup,
+    gov_note_urls as _gov_note_urls,
+    gov_nudge as _gov_nudge,
+    gov_record_search as _gov_record_search,
+    gov_state as _gov_state,
+)
 
 log = logging.getLogger("mh.deep_research")
 
 _CGNAT_V4 = ipaddress.ip_network("100.64.0.0/10")
 _MAX_REDIRECTS = 5
-_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/123.0 Safari/537.36")
-_SKIP_TAGS = ["script", "style", "nav", "footer", "header", "aside", "noscript",
-              "form", "svg", "button", "iframe"]
-_MD_LINK_RE = re.compile(r'\]\((\S+?)(\s+"[^"]*")?\)')
 _TAVILY_URL = "https://api.tavily.com/search"
-
-
-def _absolutize_links(md, base):
-    if not base:
-        return md
-    def repl(m):
-        target, title = m.group(1), m.group(2) or ""
-        if target.startswith(("http://", "https://", "mailto:", "#", "tel:", "data:")):
-            return m.group(0)
-        return f"]({urljoin(base, target)}{title})"
-    return _MD_LINK_RE.sub(repl, md)
-
-
-if MarkdownConverter is not None:
-    class _AltOnlyMarkdown(MarkdownConverter):
-        def convert_img(self, el, text, *args, **kwargs):
-            alt = (el.attrs.get("alt") or "").strip()
-            return f"![{alt}]" if alt else ""
-else:
-    _AltOnlyMarkdown = None
-
-
-# ===== over-search governor — SHARED in-process store (Thread #2, v1.2 cross-tool) ===========
-# MIRRORED byte-for-byte in tavily_search.py. OWUI DB-tools can't import a sibling module, so the
-# block is duplicated; the SHARED STATE is a sys.modules sentinel both tools (and the eval harness)
-# reach — one per-chat budget + dedup set within the single-worker uvicorn process. Pure helpers
-# below are stateless (operate on a passed-in state dict); only CHAT/ORDER on the sentinel are
-# singleton. Ephemeral (lost on restart — fine, over-search is within-conversation).
-_GOV_MAX_CHATS = 200
-_GOV_STOPWORDS = frozenset(
-    "the a an of to in for on at and or vs with from by is are be as what which how when "
-    "where who whom current latest list find show me get all any near".split()
-)
-# Collapse number / salary-syntax variants to one <num> token so cosmetic facet-repeats dedup:
-#   "100,000" == "$100k" == "100,000..200,000" == "$100,000 - $150,000".
-_GOV_NUM_RE = re.compile(
-    r"[\$£€]?\d[\d,\.]*\s*[kKmM]?(?:\s*(?:\.\.|-|to)\s*[\$£€]?\d[\d,\.]*\s*[kKmM]?)?"
-)
-
-
-def _gov_store():
-    """Process-global shared store (sys.modules sentinel) — the SAME dict for tavily_search,
-    deep_research, and the eval harness, within one uvicorn process."""
-    m = sys.modules.get("_mh_governor_store")
-    if m is None:
-        m = types.ModuleType("_mh_governor_store")
-        m.CHAT = {}    # chat_id -> {"norm":[frozenset], "raw":[str], "urls":set(), "searches":int}
-        m.ORDER = []   # LRU order of chat_ids
-        sys.modules["_mh_governor_store"] = m
-    return m
-
-
-def _gov_normalize(q):
-    """Query -> token SET for Jaccard near-dup detection (number/salary variants -> <num>,
-    site:<domain> kept, stopwords dropped)."""
-    q = (q or "").lower().replace('"', " ").replace("'", " ")
-    q = _GOV_NUM_RE.sub(" <num> ", q)
-    toks = set()
-    for raw in q.split():
-        t = raw.strip(".,;()[]{}!?")  # trim edge punctuation; keeps site:foo.bar and <num> intact
-        if t and t not in _GOV_STOPWORDS:
-            toks.add(t)
-    return frozenset(toks)
-
-
-def _gov_jaccard(a, b):
-    return (len(a & b) / len(a | b)) if (a and b) else 0.0
-
-
-def _gov_state(chat_id):
-    """Get-or-create per-chat state on the shared store (LRU-bounded)."""
-    store = _gov_store()
-    st = store.CHAT.get(chat_id)
-    if st is None:
-        st = {"norm": [], "raw": [], "urls": set(), "searches": 0}
-        store.CHAT[chat_id] = st
-        store.ORDER.append(chat_id)
-        while len(store.ORDER) > _GOV_MAX_CHATS:
-            store.CHAT.pop(store.ORDER.pop(0), None)
-    return st
-
-
-def _gov_near_dup(st, query, threshold):
-    """If `query` is a near-duplicate of a prior search THIS CHAT (any tool), return the skip note;
-    else None. Conservative: catches cosmetic repeats, leaves genuinely different facets."""
-    nq = _gov_normalize(query)
-    best, best_raw = 0.0, None
-    for pn, pr in zip(st["norm"], st["raw"]):
-        j = _gov_jaccard(nq, pn)
-        if j > best:
-            best, best_raw = j, pr
-    if best >= threshold and best_raw is not None:
-        hint = (" Open a page you already found with read_page to get a specific value, or search a "
-                "genuinely different facet." if st["urls"] else
-                " Refine to a genuinely different facet, or read a result with read_page.")
-        return (f"[over-search guard] Skipped: nearly identical to your earlier search «{best_raw}» "
-                f"(similarity {best:.0%}); re-running won't surface new results.{hint}")
-    return None
-
-
-def _gov_record_search(st, query, urls):
-    """Record a real web search (tavily OR deep_research query-mode) into the shared per-chat state."""
-    st["norm"].append(_gov_normalize(query))
-    st["raw"].append(query)
-    st["searches"] += 1
-    for u in urls:
-        if isinstance(u, str) and u.startswith("http"):
-            st["urls"].add(u)
-
-
-def _gov_note_urls(st, urls):
-    """Note URLs a READ surfaced (deep_research urls-mode) without counting a search."""
-    for u in urls:
-        if isinstance(u, str) and u.startswith("http"):
-            st["urls"].add(u)
-
-
-def _gov_nudge(st, soft_k):
-    """Read-nudge after K combined searches with URLs in hand; escalates to a firm stop at 2K."""
-    n = st["searches"]
-    if n >= max(1, soft_k) and st["urls"]:
-        if n >= 2 * max(1, soft_k):
-            return (f"\n[over-search guard] You've run {n} web searches this conversation. Stop "
-                    f"searching — you have enough sources; synthesize an answer from what you've "
-                    f"found, or open a specific listing with read_page. More broad searches won't help.")
-        return (f"\n[over-search guard] You've run {n} searches this conversation and already have "
-                f"specific page URLs. Open the most relevant result with read_page to verify exact "
-                f"values rather than searching again.")
-    return None
-# ===== end shared governor block =============================================================
 
 
 class Tools:
@@ -232,7 +84,7 @@ class Tools:
             "basic", description="Discovery search depth for `query` mode: 'basic' (1 credit) or "
                                  "'advanced' (2). Reading is done by this tool, so 'basic' usually suffices."
         )
-        # ---- over-search governor (Thread #2; shared cross-tool with tavily_search; query mode only) ----
+        # ---- over-search governor (shared cross-tool with tavily_search; query mode only) ----
         GOVERNOR_ENABLED: bool = Field(
             True, description="Over-search governor: cross-tool near-dup dedup + escalating read-nudge (query mode only; needs the injected chat_id)."
         )
@@ -430,7 +282,10 @@ class Tools:
                 urls.append(u)
         return urls[:n], None
 
-    # ---- fetch + render one source (SSRF-guarded; mirrors read_page) ----------
+    # ---- fetch + render one source (SSRF-guarded; digest-surface semantics) ----
+    # KEPT LOCAL on purpose: returns short problem REASONS for the failure list (e.g.
+    # "internal/blocked address"), not read_page's model-facing refusal strings. The
+    # markdown/decode plumbing is the lib's; only the flow + reason strings live here.
 
     async def _fetch_render(self, session, url):
         """Return (title, content_markdown, final_url, problem|None). Never raises for expected
@@ -471,7 +326,7 @@ class Tools:
         except aiohttp.ClientError:
             return "", "", final_url, "network error"
 
-        title, body = self._html_to_markdown(self._decode(raw), final_url)
+        title, body = _html_to_markdown(_decode(raw), "", final_url)
         if len(body.strip()) < 200 and "html" in ctype:
             return title, "", final_url, "almost no readable text (likely JavaScript-rendered)"
         return title, body, final_url, None
@@ -501,37 +356,3 @@ class Tools:
             if ip in _CGNAT_V4 or not ip.is_global:
                 return "non-public address"
         return None
-
-    def _html_to_markdown(self, html, base_url=""):
-        if BeautifulSoup is None or _AltOnlyMarkdown is None:
-            stripped = re.sub(r"(?is)<(script|style|nav|footer|header|aside|noscript)[^>]*>.*?</\1>", " ", html or "")
-            stripped = re.sub(r"(?s)<[^>]+>", " ", stripped)
-            return "", self._collapse(unescape(stripped))
-        soup = BeautifulSoup(html or "", "html.parser")
-        for tag in soup(_SKIP_TAGS):
-            tag.decompose()
-        title = soup.title.get_text(strip=True) if soup.title else ""
-        conv = _AltOnlyMarkdown(heading_style="ATX")
-        target = soup.find("article") or soup.find("main") or soup.body or soup
-        md = self._collapse_md(conv.convert(str(target)))
-        return title, _absolutize_links(md, base_url)
-
-    @staticmethod
-    def _decode(raw):
-        for enc in ("utf-8", "latin-1"):
-            try:
-                return raw.decode(enc)
-            except (UnicodeDecodeError, LookupError):
-                continue
-        return raw.decode("utf-8", errors="replace")
-
-    @staticmethod
-    def _collapse(text):
-        lines = [ln.strip() for ln in text.splitlines()]
-        text = "\n".join(ln for ln in lines if ln)
-        return re.sub(r"\n{3,}", "\n\n", text).strip()
-
-    @staticmethod
-    def _collapse_md(text):
-        text = "\n".join(ln.rstrip() for ln in text.splitlines())
-        return re.sub(r"\n{3,}", "\n\n", text).strip()
