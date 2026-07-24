@@ -300,6 +300,17 @@ async def whoami(request: Request) -> Response:
         f"Tailscale-User-Name={request.headers.get('Tailscale-User-Name', '')}\n")
 
 
+@mcp.custom_route("/setup-goose.sh", methods=["GET"])
+async def setup_script(request: Request) -> Response:
+    """Household onboarding: serve the Goose setup script tailnet-only (no repo clone /
+    no credentials needed on the target machine). Canonical copy lives in the
+    home_networking repo; 404s gracefully if the checkout moves."""
+    path = Path.home() / "code/home_networking/provisioning/goose/setup-goose.sh"
+    if not path.exists():
+        return PlainTextResponse("setup script not found on this host", status_code=404)
+    return Response(path.read_text(), media_type="text/x-shellscript")
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> Response:
     return PlainTextResponse(
