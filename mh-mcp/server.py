@@ -55,8 +55,34 @@ from mh_grounding.governor import gov_state  # noqa: E402
 metrics.init(port=None, client="mh-mcp")
 
 TAVILY_KEY = os.environ.get("TAVILY_API_KEY", "")
+OWUI_API_BASE = os.environ.get("OWUI_API_BASE", "http://100.100.81.77:8080")
+OWUI_API_KEY = os.environ.get("OWUI_API_KEY", "")
+# Identity gate for the BRIDGE tools (plan §5b — they act with the operator's OWUI key,
+# so they are identity-bearing). Loopback callers = the operator's own machine account;
+# tailnet callers must present a matching Tailscale-User-Login header (injected by
+# Tailscale Serve). Anything else — including an undeterminable caller — is REFUSED.
+OPERATOR_LOGIN = os.environ.get("MH_OPERATOR_LOGIN", "aashish.sinha94@gmail.com")
 
 mcp = FastMCP("mh-grounding", host=HOST, port=PORT)
+
+
+def _bridge_refusal(ctx: Context):
+    """None if the caller may use the identity-bearing bridge tools; else a refusal string.
+    Fail-closed: no request handle / unknown host / wrong tailnet identity all refuse."""
+    try:
+        req = ctx.request_context.request
+        host = req.client.host if req.client else None
+        if host in ("127.0.0.1", "::1"):
+            return None  # loopback = the operator's own machine session
+        login = req.headers.get("Tailscale-User-Login", "")
+        if login and login.lower() == OPERATOR_LOGIN.lower():
+            return None  # tailnet caller with the operator's Tailscale identity
+        return ("This bridge tool acts with the operator's OWUI credentials and is only "
+                "available to the operator's own sessions (caller identity: "
+                f"{login or host or 'unknown'}).")
+    except Exception:
+        return ("This bridge tool acts with the operator's OWUI credentials and could not "
+                "verify the caller's identity — refusing.")
 
 
 def _session_gov(ctx: Context):
@@ -158,6 +184,62 @@ async def research_search(query: str, ctx: Context) -> str:
     gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "research"))
     result = knowledge_mod.research_query(query, cfg=knowledge_mod.KnowledgeConfig(), gov=gov)
     return result.text
+
+
+@mcp.tool()
+@metrics.instrument("owui_chat", "local")
+async def owui_chat(ctx: Context, chat_id: str | None = None, recent: int = 10) -> str:
+    """Read the operator's Open WebUI chats — the planning/research done on the phone or in
+    the browser. Without chat_id: lists the most recent chats (id · title · when). With
+    chat_id: returns that chat as a distilled transcript to work from. Use this to pick up
+    a plan or research thread the operator started in OWUI chat.
+    """
+    from mh_grounding import bridge
+    refusal = _bridge_refusal(ctx)
+    if refusal:
+        return refusal
+    if chat_id:
+        title, transcript = bridge.get_chat(chat_id)
+        if title is None:
+            return transcript  # the error string
+        return f"# {title}\n\n{transcript}"
+    import datetime
+    rows = bridge.list_chats(recent)
+    if not rows:
+        return "No chats found."
+    lines = [f"{r[0]} · {r[1]} · {datetime.datetime.fromtimestamp(r[2]):%Y-%m-%d %H:%M}"
+             for r in rows]
+    return "Recent OWUI chats (id · title · updated):\n" + "\n".join(lines)
+
+
+@mcp.tool()
+@metrics.instrument("save_owui_note", "local")
+async def save_owui_note(ctx: Context, title: str, markdown: str) -> str:
+    """Save a document into the operator's Open WebUI Notes — the write-back half of the
+    OWUI⇄agent bridge. Use it to hand results, summaries, or plans from this session back
+    to the operator's OWUI (readable on their phone). Write a DISTILLED, self-contained
+    markdown document — not a raw transcript.
+    """
+    from mh_grounding import bridge
+    refusal = _bridge_refusal(ctx)
+    if refusal:
+        return refusal
+    if not OWUI_API_KEY:
+        return "The bridge is not configured (no OWUI_API_KEY in the env file)."
+    note_id, err = await bridge.save_note(title, markdown, OWUI_API_BASE, OWUI_API_KEY)
+    if err:
+        return err
+    return f"Saved to OWUI Notes: “{title}” (note id {note_id})."
+
+
+@mcp.custom_route("/whoami", methods=["GET"])
+async def whoami(request: Request) -> Response:
+    """Debug: echoes the caller identity the server perceives (client host + the Tailscale
+    Serve identity headers). Use from the laptop to verify the P5 identity-gating path."""
+    return PlainTextResponse(
+        f"client={request.client.host if request.client else '?'}\n"
+        f"Tailscale-User-Login={request.headers.get('Tailscale-User-Login', '')}\n"
+        f"Tailscale-User-Name={request.headers.get('Tailscale-User-Name', '')}\n")
 
 
 @mcp.custom_route("/health", methods=["GET"])
