@@ -65,6 +65,19 @@ OWUI_API_KEY = os.environ.get("OWUI_API_KEY", "")
 # Tailscale Serve). Anything else — including an undeterminable caller — is REFUSED.
 OPERATOR_LOGIN = os.environ.get("MH_OPERATOR_LOGIN", "aashish.sinha94@gmail.com")
 
+# knowledge_search corpus routing by caller identity (defense-in-depth: the full corpus
+# holds infra mechanics / incident writeups that are attacker-useful; household members get
+# a whitelist-authored PUBLIC corpus instead). IDs overridable via env.
+KB_FULL = os.environ.get("MH_KB_FULL", "0854e216-8644-4d9e-95c3-d5f6727719e7")       # home-networking-repo
+KB_PUBLIC = os.environ.get("MH_KB_PUBLIC", "28dd8b1a-23d1-4dd4-8760-a6fa58c6e8c2")   # home-networking-public
+KB_REFERENCE = os.environ.get("MH_KB_REFERENCE", "82a7c3ab-4d3e-4008-9123-c11c18bad8e5")  # reference:python
+
+
+def _is_operator(ctx: Context):
+    """True only for the operator (loopback machine session, or the operator's Tailscale
+    identity over Serve). Same fail-closed logic as the bridge gate."""
+    return _bridge_refusal(ctx) is None
+
 # DNS-rebinding protection (the spec's Origin/Host validation — the SDK enforces it with
 # 421s). Loopback identities plus the Tailscale Serve hostname; extend via MH_MCP_ALLOWED_HOSTS
 # (comma-separated host:port) if the serve name ever changes.
@@ -225,7 +238,11 @@ async def knowledge_search(query: str, ctx: Context) -> str:
     """
     metrics.session_seen(f"mcp-{id(ctx.session)}")
     gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "knowledge"))
-    result = knowledge_mod.knowledge_query(query, cfg=knowledge_mod.KnowledgeConfig(), gov=gov)
+    # Operator -> full home-networking corpus; everyone else -> the PUBLIC household guide.
+    # Reference-docs corpus is shared by all. The full corpus never reaches a non-operator.
+    kb = KB_FULL if _is_operator(ctx) else KB_PUBLIC
+    cfg = knowledge_mod.KnowledgeConfig(KB_COLLECTION_ID=kb, REFERENCE_COLLECTION_IDS=KB_REFERENCE)
+    result = knowledge_mod.knowledge_query(query, cfg=cfg, gov=gov)
     return result.text
 
 
