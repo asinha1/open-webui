@@ -311,6 +311,15 @@ async def setup_script(request: Request) -> Response:
     return Response(path.read_text(), media_type="text/x-shellscript")
 
 
+@mcp.custom_route("/KARINA-GUIDE.md", methods=["GET"])
+async def setup_guide(request: Request) -> Response:
+    """Household onboarding: the non-technical guide, same serving rationale as the script."""
+    path = Path.home() / "code/home_networking/provisioning/goose/KARINA-GUIDE.md"
+    if not path.exists():
+        return PlainTextResponse("guide not found on this host", status_code=404)
+    return Response(path.read_text(), media_type="text/markdown")
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> Response:
     return PlainTextResponse(
