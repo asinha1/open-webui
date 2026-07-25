@@ -69,7 +69,7 @@ OPERATOR_LOGIN = os.environ.get("MH_OPERATOR_LOGIN", "aashish.sinha94@gmail.com"
 # holds infra mechanics / incident writeups that are attacker-useful; household members get
 # a whitelist-authored PUBLIC corpus instead). IDs overridable via env.
 KB_FULL = os.environ.get("MH_KB_FULL", "0854e216-8644-4d9e-95c3-d5f6727719e7")       # home-networking-repo
-KB_PUBLIC = os.environ.get("MH_KB_PUBLIC", "28dd8b1a-23d1-4dd4-8760-a6fa58c6e8c2")   # home-networking-public
+KB_PUBLIC = os.environ.get("MH_KB_PUBLIC", "887c307e-ace7-4889-a546-0ce058c67a63")   # home-networking-public
 KB_REFERENCE = os.environ.get("MH_KB_REFERENCE", "82a7c3ab-4d3e-4008-9123-c11c18bad8e5")  # reference:python
 
 
