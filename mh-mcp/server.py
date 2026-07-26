@@ -75,8 +75,9 @@ KB_REFERENCE = os.environ.get("MH_KB_REFERENCE", "82a7c3ab-4d3e-4008-9123-c11c18
 
 def _is_operator(ctx: Context):
     """True only for the operator (loopback machine session, or the operator's Tailscale
-    identity over Serve). Same fail-closed logic as the bridge gate."""
-    return _bridge_refusal(ctx) is None
+    identity over Serve). Delegates to the pure is_operator_identity (testable core)."""
+    host, login = _ctx_identity(ctx)
+    return is_operator_identity(host, login)
 
 # DNS-rebinding protection (the spec's Origin/Host validation — the SDK enforces it with
 # 421s). Loopback identities plus the Tailscale Serve hostname; extend via MH_MCP_ALLOWED_HOSTS
@@ -102,23 +103,41 @@ _WRITE_LOCAL = ToolAnnotations(readOnlyHint=False, destructiveHint=False,
                                idempotentHint=False, openWorldHint=False)  # note create
 
 
-def _bridge_refusal(ctx: Context):
-    """None if the caller may use the identity-bearing bridge tools; else a refusal string.
-    Fail-closed: no request handle / unknown host / wrong tailnet identity all refuse."""
+# --- identity resolution (PURE + testable; the routing/auth core) ------------------
+LOOPBACK_HOSTS = ("127.0.0.1", "::1")
+
+
+def is_operator_identity(host, login, operator_login=None):
+    """Pure identity decision — the single source of truth for operator-vs-other, used by
+    BOTH the bridge gate and the knowledge_search corpus routing. Testable without a live
+    request. Fail-closed: loopback = operator (own machine); a tailnet caller is operator
+    ONLY if the tailscaled-injected Tailscale-User-Login matches; everything else = other."""
+    op = (operator_login or OPERATOR_LOGIN).lower()
+    if host in LOOPBACK_HOSTS:
+        return True
+    return bool(login) and login.strip().lower() == op
+
+
+def _ctx_identity(ctx: Context):
+    """Extract (host, login) from a request context; ('' , '') if unavailable (→ non-operator)."""
     try:
         req = ctx.request_context.request
         host = req.client.host if req.client else None
-        if host in ("127.0.0.1", "::1"):
-            return None  # loopback = the operator's own machine session
         login = req.headers.get("Tailscale-User-Login", "")
-        if login and login.lower() == OPERATOR_LOGIN.lower():
-            return None  # tailnet caller with the operator's Tailscale identity
-        return ("This bridge tool acts with the operator's OWUI credentials and is only "
-                "available to the operator's own sessions (caller identity: "
-                f"{login or host or 'unknown'}).")
+        return host, login
     except Exception:
-        return ("This bridge tool acts with the operator's OWUI credentials and could not "
-                "verify the caller's identity — refusing.")
+        return None, ""
+
+
+def _bridge_refusal(ctx: Context):
+    """None if the caller may use the identity-bearing bridge tools; else a refusal string.
+    Fail-closed: no request handle / unknown host / wrong tailnet identity all refuse."""
+    host, login = _ctx_identity(ctx)
+    if is_operator_identity(host, login):
+        return None
+    return ("This bridge tool acts with the operator's OWUI credentials and is only "
+            "available to the operator's own sessions (caller identity: "
+            f"{login or host or 'unknown'}).")
 
 
 # login -> short display name for metric labels (operator preference: names, not emails).
@@ -239,9 +258,17 @@ async def knowledge_search(query: str, ctx: Context) -> str:
     metrics.session_seen(f"mcp-{id(ctx.session)}")
     gov = knowledge_mod.kgov_state((f"mcp-{id(ctx.session)}", "knowledge"))
     # Operator -> full home-networking corpus; everyone else -> the PUBLIC household guide.
-    # Reference-docs corpus is shared by all. The full corpus never reaches a non-operator.
-    kb = KB_FULL if _is_operator(ctx) else KB_PUBLIC
-    cfg = knowledge_mod.KnowledgeConfig(KB_COLLECTION_ID=kb, REFERENCE_COLLECTION_IDS=KB_REFERENCE)
+    # Reference-docs corpus is shared by all. The full corpus never reaches a non-operator —
+    # and the non-operator's "not found" message must not even NAME the full corpus's
+    # coverage (incidents/configs), so give the public path its own KB_DESCRIPTION.
+    if _is_operator(ctx):
+        cfg = knowledge_mod.KnowledgeConfig(KB_COLLECTION_ID=KB_FULL,
+                                            REFERENCE_COLLECTION_IDS=KB_REFERENCE)
+    else:
+        cfg = knowledge_mod.KnowledgeConfig(
+            KB_COLLECTION_ID=KB_PUBLIC, REFERENCE_COLLECTION_IDS=KB_REFERENCE,
+            KB_DESCRIPTION=("the household's services guide (how to use the home services) and "
+                            "official docs for common software libraries"))
     result = knowledge_mod.knowledge_query(query, cfg=cfg, gov=gov)
     return result.text
 
