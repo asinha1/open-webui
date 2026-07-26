@@ -30,8 +30,10 @@ it's a documented **manual check from a household device**: on Karina's laptop, 
 infra question and confirm it does NOT get infra content. Run that after any routing change.
 
 ## Expansion areas (proposed — build as the server grows)
-- **Area 2 — Bridge identity gate:** `owui_chat`/`save_owui_note` refuse non-operators
-  (pure via `_bridge_refusal` over constructed contexts) + operator live-path allowed.
+- **Area 2 — Bridge identity gate (`test_bridge.py`) ✅ DONE:** `_bridge_refusal` allows
+  operator / refuses everyone else / fails closed (7 branch cases); a refused call is proven
+  to NEVER reach the DB or write with the operator's key (monkeypatched short-circuit —
+  incl. the critical `save_owui_note`-never-writes case); operator live-path lists chats.
 - **Area 3 — Governor:** per-session dedup fires; cross-tool (tavily↔deep_research) shares
   a budget; sessions are isolated; read-nudge escalates. Mostly LIVE + governor-unit.
 - **Area 4 — CRAG behavior:** on-domain hits ≥ 0.69; off-domain → actionable-empty (not
