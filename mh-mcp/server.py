@@ -355,6 +355,16 @@ async def setup_script(request: Request) -> Response:
     return Response(path.read_text(), media_type="text/x-shellscript")
 
 
+@mcp.custom_route("/grab-session.sh", methods=["GET"])
+async def grab_script(request: Request) -> Response:
+    """Post-session grab: serve the laptop-side push script tailnet-only (run on the
+    member's laptop after a session to push Goose data to hephaestus for analysis)."""
+    path = Path.home() / "code/home_networking/provisioning/goose/grab-session.sh"
+    if not path.exists():
+        return PlainTextResponse("grab script not found on this host", status_code=404)
+    return Response(path.read_text(), media_type="text/x-shellscript")
+
+
 @mcp.custom_route("/KARINA-GUIDE.md", methods=["GET"])
 async def setup_guide(request: Request) -> Response:
     """Household onboarding: the non-technical guide, same serving rationale as the script."""
