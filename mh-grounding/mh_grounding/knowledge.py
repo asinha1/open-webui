@@ -90,7 +90,7 @@ def query_collections(collection_ids, query, k, vector_db_path=DEFAULT_VECTOR_DB
                         include=["documents", "metadatas", "distances"])
         for d, m, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0]):
             merged.append((_score_from_distance(dist, space), d, m or {}))
-    merged.sort(key=lambda x: (x[0] is not None, x[0]), reverse=True)
+    merged.sort(key=lambda x: (x[0] is not None, x[0] if x[0] is not None else 0.0), reverse=True)
     return merged[:k]
 
 

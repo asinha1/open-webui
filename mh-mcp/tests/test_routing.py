@@ -37,7 +37,7 @@ INFRA_MARKERS = ("listenaddress", "100.111", "sshd", "cloudflare", "adguard", "c
 @pytest.mark.parametrize("host,login,expect", [
     ("127.0.0.1", "",                 True),   # loopback = operator's own machine
     ("::1",       "",                 True),   # ipv6 loopback
-    ("127.0.0.1", "anyone@x.com",     True),   # loopback wins regardless of header
+    ("127.0.0.1", "anyone@x.com",     False),  # HEADER-AUTHORITATIVE: a present non-operator login wins over loopback
     ("100.100.81.77", OPERATOR,       True),   # tailnet + operator login
     ("100.100.81.77", OPERATOR.upper(), True), # case-insensitive
     ("100.100.81.77", f"  {OPERATOR} ", True), # whitespace-tolerant

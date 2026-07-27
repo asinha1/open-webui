@@ -41,17 +41,23 @@ def list_chats(n=10, webui_db_path=DEFAULT_WEBUI_DB):
 def get_chat(chat_id, max_chars=60000, webui_db_path=DEFAULT_WEBUI_DB):
     """One chat distilled to a markdown transcript (title + role-labelled turns).
     Returns (title, transcript) or (None, error_string)."""
-    db = sqlite3.connect(f"file:{webui_db_path}?mode=ro", uri=True)
     try:
-        row = db.execute("SELECT title, chat FROM chat WHERE id = ?", (chat_id,)).fetchone()
-    finally:
-        db.close()
-    if not row:
-        return None, f"No chat with id {chat_id!r}. Use the chat list to find a valid id."
-    title, blob = row[0], json.loads(row[1])
+        db = sqlite3.connect(f"file:{webui_db_path}?mode=ro", uri=True)
+        try:
+            row = db.execute("SELECT title, chat FROM chat WHERE id = ?", (chat_id,)).fetchone()
+        finally:
+            db.close()
+        if not row:
+            return None, f"No chat with id {chat_id!r}. Use the chat list to find a valid id."
+        title, blob = row[0], json.loads(row[1])
+        if not isinstance(blob, dict):
+            return title, "(chat data is not readable)"
+    except Exception as e:  # malformed JSON / db error → model-readable, never a protocol crash
+        log.warning("bridge get_chat error id=%r: %s", chat_id, e)
+        return None, f"Could not read chat {chat_id!r} (unreadable data)."
     history = blob.get("history") or {}
     msgs = history.get("messages") or {}
-    if not msgs:
+    if not msgs or not isinstance(msgs, dict):
         return title, "(empty chat)"
 
     # Walk the on-screen branch: currentId -> parents; else timestamp order.

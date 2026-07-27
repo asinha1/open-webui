@@ -110,12 +110,19 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 def is_operator_identity(host, login, operator_login=None):
     """Pure identity decision — the single source of truth for operator-vs-other, used by
     BOTH the bridge gate and the knowledge_search corpus routing. Testable without a live
-    request. Fail-closed: loopback = operator (own machine); a tailnet caller is operator
-    ONLY if the tailscaled-injected Tailscale-User-Login matches; everything else = other."""
+    request.
+
+    HEADER-AUTHORITATIVE (defense-in-depth, 2026-07-26 review): a Tailscale-Serve request
+    ALWAYS carries the tailscaled-injected Tailscale-User-Login header, so if a login is
+    present it is the SOLE authority — it must match the operator, regardless of the
+    apparent client host. Only when NO identity header is present do we trust loopback as
+    the operator's own local process. This removes any dependence on Serve preserving the
+    caller's tailnet IP (a generic reverse-proxy-to-loopback would show client.host=127.0.0.1;
+    Serve/tsnet does not, but we no longer rely on that). Fail-closed everywhere else."""
     op = (operator_login or OPERATOR_LOGIN).lower()
-    if host in LOOPBACK_HOSTS:
-        return True
-    return bool(login) and login.strip().lower() == op
+    if login:  # a present identity header decides, period (Serve-proxied tailnet caller)
+        return login.strip().lower() == op
+    return host in LOOPBACK_HOSTS  # no header → genuine local process = operator
 
 
 def _ctx_identity(ctx: Context):
@@ -152,18 +159,17 @@ for _pair in os.environ.get("MH_USER_NAMES", "aashish.sinha94@gmail.com=aashish"
 
 
 def _caller_user(ctx: Context):
-    """User label for metrics attribution: 'local' for loopback callers, a short name
-    (mapped from the tailscaled-injected Tailscale-User-Login) for Serve-proxied tailnet
-    requests, else 'unknown'. Household-scale label cardinality by construction."""
+    """User label for metrics attribution — HEADER-AUTHORITATIVE, mirroring
+    is_operator_identity: a present Tailscale-User-Login maps to its short name (Serve-proxied
+    tailnet caller); otherwise a loopback caller is 'local' (operator's own process); else
+    'unknown'. Household-scale label cardinality by construction."""
     try:
         req = ctx.request_context.request
+        login = (req.headers.get("Tailscale-User-Login", "") or "").strip().lower()
+        if login:
+            return _USER_NAMES.get(login) or login.partition("@")[0]
         host = req.client.host if req.client else None
-        if host in ("127.0.0.1", "::1"):
-            return "local"
-        login = (req.headers.get("Tailscale-User-Login", "") or "").lower()
-        if not login:
-            return "unknown"
-        return _USER_NAMES.get(login) or login.partition("@")[0]
+        return "local" if host in ("127.0.0.1", "::1") else "unknown"
     except Exception:
         return "unknown"
 
@@ -306,11 +312,20 @@ async def owui_chat(ctx: Context, chat_id: str | None = None, recent: int = 10) 
             return transcript  # the error string
         return f"# {title}\n\n{transcript}"
     import datetime
-    rows = bridge.list_chats(recent)
+    try:
+        rows = bridge.list_chats(recent)
+    except Exception as e:
+        log.warning("owui_chat list error: %s", e)
+        return "Could not list chats right now."
     if not rows:
         return "No chats found."
-    lines = [f"{r[0]} · {r[1]} · {datetime.datetime.fromtimestamp(r[2]):%Y-%m-%d %H:%M}"
-             for r in rows]
+
+    def _when(ts):
+        try:
+            return f"{datetime.datetime.fromtimestamp(ts):%Y-%m-%d %H:%M}" if ts else "?"
+        except Exception:
+            return "?"
+    lines = [f"{r[0]} · {r[1]} · {_when(r[2])}" for r in rows]
     return "Recent OWUI chats (id · title · updated):\n" + "\n".join(lines)
 
 
