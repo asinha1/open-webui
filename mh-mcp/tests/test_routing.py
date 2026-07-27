@@ -14,7 +14,7 @@ Run: ../.venv/bin/python -m pytest tests/test_routing.py -v   (from mh-mcp/)
 """
 import pytest
 
-from conftest import call_text
+from conftest import call_text, open_mcp, server_up
 
 OPERATOR = "aashish.sinha94@gmail.com"
 KARINA = "alkhasyankarina@gmail.com"
@@ -124,9 +124,12 @@ def test_public_corpus_serves_household_queries(srv, kq):
 # ---- 3b. ISOLATION (live) — the operator path over MCP returns the full corpus --------
 
 @pytest.mark.asyncio
-async def test_live_operator_gets_full_corpus(mcp_session):
+async def test_live_operator_gets_full_corpus():
     """End-to-end: loopback (operator) knowledge_search on an infra query reaches the full
     corpus. (The non-operator live path can't be tested from the operator's own box — it's
     a documented manual check from a household device; see tests/README.md.)"""
-    txt = await call_text(mcp_session, "knowledge_search", {"query": "how is SSH bound on janus"})
+    if not await server_up():
+        pytest.skip("mh-mcp server not running")
+    async with open_mcp() as s:
+        txt = await call_text(s, "knowledge_search", {"query": "how is SSH bound on janus"})
     assert "Found" in txt and "relevant document" in txt, f"operator live path did not reach full corpus: {txt[:120]}"

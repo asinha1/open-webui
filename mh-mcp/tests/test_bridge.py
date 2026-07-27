@@ -13,7 +13,7 @@ Run: ../.venv/bin/python -m pytest tests/test_bridge.py -v   (from mh-mcp/)
 """
 import pytest
 
-from conftest import call_text
+from conftest import call_text, open_mcp, server_up
 
 OPERATOR = "aashish.sinha94@gmail.com"
 KARINA = "alkhasyankarina@gmail.com"
@@ -104,8 +104,11 @@ async def test_operator_owui_chat_reaches_bridge(srv, monkeypatch):
 # ---- 3. OPERATOR PATH (live) — loopback list actually works ---------------------------
 
 @pytest.mark.asyncio
-async def test_live_operator_can_list_chats(mcp_session):
-    txt = await call_text(mcp_session, "owui_chat", {"recent": 3})
+async def test_live_operator_can_list_chats():
+    if not await server_up():
+        pytest.skip("mh-mcp server not running")
+    async with open_mcp() as s:
+        txt = await call_text(s, "owui_chat", {"recent": 3})
     # operator path: either lists chats or says none — but NOT the refusal
     assert "operator's OWUI credentials" not in txt, f"operator was refused on loopback: {txt[:100]}"
     assert ("Recent OWUI chats" in txt) or ("No chats" in txt)

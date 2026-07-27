@@ -25,19 +25,32 @@ def srv():
     return server
 
 
-@pytest.fixture
-async def mcp_session():
-    """A live MCP ClientSession to loopback mh-mcp (= the OPERATOR identity path).
-    Skips if the server isn't reachable."""
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def open_mcp():
+    """Open a live MCP ClientSession to loopback mh-mcp (= the OPERATOR identity path).
+    Used as `async with open_mcp() as s:` INSIDE a test so the client's nested async
+    context managers enter AND exit in the same task (anyio cancel-scope requirement —
+    an async-generator *fixture* enters/exits in different tasks under pytest-asyncio and
+    trips 'exit cancel scope in a different task')."""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
+    async with streamablehttp_client(MCP_URL) as (r, w, _):
+        async with ClientSession(r, w) as s:
+            await s.initialize()
+            yield s
+
+
+async def server_up():
+    """True if mh-mcp answers on loopback — for a real (not bug-masking) skip guard."""
+    import urllib.request
     try:
-        async with streamablehttp_client(MCP_URL) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-                yield s
-    except Exception as e:
-        pytest.skip(f"mh-mcp not reachable at {MCP_URL}: {e}")
+        urllib.request.urlopen(MCP_URL.replace("/mcp", "/health"), timeout=3).read()
+        return True
+    except Exception:
+        return False
 
 
 async def call_text(session, tool, args):
