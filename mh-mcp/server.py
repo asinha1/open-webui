@@ -382,8 +382,18 @@ async def grab_script(request: Request) -> Response:
 
 @mcp.custom_route("/KARINA-GUIDE.md", methods=["GET"])
 async def setup_guide(request: Request) -> Response:
-    """Household onboarding: the non-technical guide, same serving rationale as the script."""
+    """Household onboarding: the non-technical CLI guide, same serving rationale as the script."""
     path = Path.home() / "code/home_networking/provisioning/goose/KARINA-GUIDE.md"
+    if not path.exists():
+        return PlainTextResponse("guide not found on this host", status_code=404)
+    return Response(path.read_text(), media_type="text/markdown")
+
+
+@mcp.custom_route("/DESKTOP-GUIDE.md", methods=["GET"])
+async def desktop_guide(request: Request) -> Response:
+    """Household onboarding: the non-technical guide for the Goose Desktop app (shares
+    config with the CLI; reuses setup-goose.sh for settings)."""
+    path = Path.home() / "code/home_networking/provisioning/goose/DESKTOP-GUIDE.md"
     if not path.exists():
         return PlainTextResponse("guide not found on this host", status_code=404)
     return Response(path.read_text(), media_type="text/markdown")
